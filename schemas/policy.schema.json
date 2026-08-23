@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://secretctl.dev/schemas/policy.schema.json",
+  "title": "SecretctlPolicy",
+  "description": "Schema for secretctl authorization and risk policies.",
+  "type": "object",
+  "properties": {
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" },
+          "effect": { "type": "string", "enum": ["allow", "deny"] },
+          "principals": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "credentials": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "authenticate.password",
+                "authenticate.totp",
+                "form.sensitive_fill",
+                "oauth.authorize"
+              ]
+            }
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "origin": { "type": "string" },
+                "path_prefix": { "type": "string" }
+              },
+              "required": ["origin"],
+              "additionalProperties": false
+            }
+          },
+          "conditions": {
+            "type": "object",
+            "properties": {
+              "browser_assurance": { "type": "string", "enum": ["managed", "isolated"] },
+              "require_user_presence": { "type": "boolean" },
+              "max_uses": { "type": "integer", "minimum": 1, "maximum": 10 },
+              "max_ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 300 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "effect", "principals", "credentials", "actions", "destinations"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["version", "rules"],
+  "additionalProperties": false
+}

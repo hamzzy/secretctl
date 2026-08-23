@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://secretctl.dev/schemas/executor-rpc.schema.json",
+  "title": "ExecutorRPCMessage",
+  "description": "Executor-facing JSON-RPC 2.0 messages for browser runtime interaction.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/ExecutorPrepare" },
+    { "$ref": "#/$defs/ExecutorConsume" },
+    { "$ref": "#/$defs/ExecutorResult" },
+    { "$ref": "#/$defs/ExecutorHeartbeat" }
+  ],
+  "$defs": {
+    "ExecutorPrepare": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "executor.prepare" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "browser_session_id": { "type": "string" },
+            "tab_id": { "type": "integer" },
+            "frame_id": { "type": "integer" },
+            "document_id": { "type": "string" },
+            "navigation_epoch": { "type": "integer" },
+            "top_origin": { "type": "string" },
+            "frame_origin": { "type": "string" },
+            "path_sha256": { "type": "string" },
+            "tls": { "type": "boolean" },
+            "incognito": { "type": "boolean" }
+          },
+          "required": [
+            "browser_session_id",
+            "tab_id",
+            "frame_id",
+            "document_id",
+            "navigation_epoch",
+            "top_origin",
+            "frame_origin",
+            "path_sha256",
+            "tls"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
+    "ExecutorConsume": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "executor.consume" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "capability_token": { "type": "string" },
+            "session_signature": { "type": "string" },
+            "current_context": {
+              "type": "object",
+              "properties": {
+                "browser_session_id": { "type": "string" },
+                "tab_id": { "type": "integer" },
+                "frame_id": { "type": "integer" },
+                "document_id": { "type": "string" },
+                "navigation_epoch": { "type": "integer" },
+                "top_origin": { "type": "string" },
+                "frame_origin": { "type": "string" },
+                "path_sha256": { "type": "string" },
+                "tls": { "type": "boolean" }
+              },
+              "required": ["browser_session_id", "tab_id", "frame_id", "document_id", "navigation_epoch", "top_origin", "frame_origin", "tls"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["capability_token", "session_signature", "current_context"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
+    "ExecutorResult": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "executor.result" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "execution_id": { "type": "string" },
+            "status": { "type": "string", "enum": ["completed", "failed"] },
+            "result_code": { "type": "string" },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "submitted": { "type": "boolean" },
+                "fields_filled_count": { "type": "integer" },
+                "outcome_selector_matched": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["execution_id", "status", "result_code"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
+    "ExecutorHeartbeat": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "executor.heartbeat" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "browser_session_id": { "type": "string" },
+            "active_tab_count": { "type": "integer" },
+            "timestamp": { "type": "string" }
+          },
+          "required": ["browser_session_id", "timestamp"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    }
+  }
+}

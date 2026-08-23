@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://secretctl.dev/schemas/recipe.schema.json",
+  "title": "SiteRecipe",
+  "description": "Schema for deterministic browser interaction recipes. Predefined selectors and execution constraints.",
+  "type": "object",
+  "properties": {
+    "recipe_id": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "name": { "type": "string" },
+    "action": {
+      "type": "string",
+      "enum": [
+        "authenticate.password",
+        "authenticate.totp",
+        "form.sensitive_fill",
+        "oauth.authorize"
+      ]
+    },
+    "match": {
+      "type": "object",
+      "properties": {
+        "top_origin": { "type": "string" },
+        "path_prefix": { "type": "string" },
+        "frame_origin": { "type": "string" }
+      },
+      "required": ["top_origin"],
+      "additionalProperties": false
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["username", "password", "totp_code", "sensitive_text"]
+          },
+          "selector": { "type": "string" },
+          "optional": { "type": "boolean" },
+          "clear_first": { "type": "boolean" }
+        },
+        "required": ["role", "selector"],
+        "additionalProperties": false
+      }
+    },
+    "submit": {
+      "type": "object",
+      "properties": {
+        "selector": { "type": "string" },
+        "auto_submit": { "type": "boolean" },
+        "delay_ms": { "type": "integer", "minimum": 0, "maximum": 5000 }
+      },
+      "additionalProperties": false
+    },
+    "success_indicators": {
+      "type": "object",
+      "properties": {
+        "navigation_origin": { "type": "string" },
+        "selector_present": { "type": "string" },
+        "selector_absent": { "type": "string" },
+        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 30000 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["recipe_id", "version", "name", "action", "match", "fields"],
+  "additionalProperties": false
+}

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://secretctl.dev/schemas/agent-rpc.schema.json",
+  "title": "AgentRPCMessage",
+  "description": "Agent-facing JSON-RPC 2.0 messages. Prohibits any secret-bearing fields.",
+  "type": "object",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ActionRequest"
+    },
+    {
+      "$ref": "#/$defs/ActionStatusRequest"
+    },
+    {
+      "$ref": "#/$defs/ActionCancelRequest"
+    },
+    {
+      "$ref": "#/$defs/BrowserRequestSession"
+    },
+    {
+      "$ref": "#/$defs/SessionHello"
+    }
+  ],
+  "$defs": {
+    "ActionRequest": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "action.request" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "request_id": { "type": "string" },
+            "action": {
+              "type": "string",
+              "enum": [
+                "authenticate.password",
+                "authenticate.totp",
+                "form.sensitive_fill",
+                "oauth.authorize"
+              ]
+            },
+            "identity": { "type": "string" },
+            "target": {
+              "type": "object",
+              "properties": {
+                "origin": { "type": "string", "format": "uri" },
+                "path_prefix": { "type": "string" }
+              },
+              "required": ["origin"],
+              "additionalProperties": false
+            },
+            "browser_session_id": { "type": "string" },
+            "tab_hint": { "type": "integer" },
+            "reason": { "type": "string" },
+            "wait": { "type": "boolean" },
+            "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+            "client_context": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "required": ["request_id", "action", "identity", "target", "browser_session_id", "reason"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
+    "ActionStatusRequest": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "action.status" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "request_id": { "type": "string" }
+          },
+          "required": ["request_id"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
+    "ActionCancelRequest": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "action.cancel" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "request_id": { "type": "string" },
+            "reason": { "type": "string" }
+          },
+          "required": ["request_id"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
+    "BrowserRequestSession": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "browser.request_session" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "profile": { "type": "string" },
+            "incognito": { "type": "boolean" },
+            "purpose": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
+    "SessionHello": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "session.hello" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "protocol_version": { "type": "string" },
+            "role": { "type": "string", "enum": ["agent", "admin", "executor"] },
+            "principal_id": { "type": "string" },
+            "client_nonce": { "type": "string" },
+            "supported_suites": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["protocol_version", "role", "principal_id", "client_nonce", "supported_suites"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    }
+  }
+}

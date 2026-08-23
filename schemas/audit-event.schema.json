@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://secretctl.dev/schemas/audit-event.schema.json",
+  "title": "AuditEvent",
+  "description": "Tamper-evident audit record schema with cryptographic hash chaining.",
+  "type": "object",
+  "properties": {
+    "sequence": { "type": "integer", "minimum": 1 },
+    "event_id": { "type": "string" },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "agent.enrolled",
+        "agent.connected",
+        "action.requested",
+        "policy.evaluated",
+        "approval.challenged",
+        "approval.decided",
+        "capability.minted",
+        "capability.consumed",
+        "capability.revoked",
+        "capability.expired",
+        "secret.accessed",
+        "executor.started",
+        "executor.completed",
+        "executor.failed",
+        "session.invalidated",
+        "security.violation"
+      ]
+    },
+    "actor_type": { "type": "string", "enum": ["agent", "user", "broker", "executor"] },
+    "actor_id": { "type": ["string", "null"] },
+    "context": {
+      "type": "object",
+      "properties": {
+        "request_id": { "type": "string" },
+        "credential_id": { "type": "string" },
+        "capability_id": { "type": "string" },
+        "browser_session_id": { "type": "string" },
+        "target_origin": { "type": "string" },
+        "action": { "type": "string" },
+        "decision": { "type": "string" },
+        "risk_level": { "type": "string" },
+        "error_code": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "previous_hash": { "type": "string", "description": "Hex-encoded SHA-256 hash of previous audit event" },
+    "event_hash": { "type": "string", "description": "Hex-encoded SHA-256 hash of current audit event" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "required": [
+    "sequence",
+    "event_id",
+    "event_type",
+    "actor_type",
+    "context",
+    "previous_hash",
+    "event_hash",
+    "created_at"
+  ],
+  "additionalProperties": false
+}

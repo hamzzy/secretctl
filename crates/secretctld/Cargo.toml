@@ -1,0 +1,26 @@
+[package]
+name = "secretctld"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "secretctld"
+path = "src/main.rs"
+
+[dependencies]
+secretctl-domain = { workspace = true }
+secretctl-protocol = { workspace = true }
+secretctl-crypto = { workspace = true }
+secretctl-policy = { workspace = true }
+secretctl-capability = { workspace = true }
+secretctl-providers = { workspace = true }
+secretctl-audit = { workspace = true }
+secretctl-store = { workspace = true }
+secretctl-browser-gateway = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
