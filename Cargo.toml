@@ -7,6 +7,7 @@ members = [
     "crates/secretctl-policy",
     "crates/secretctl-capability",
     "crates/secretctl-providers",
+    "crates/secretctl-provider-macos",
     "crates/secretctl-audit",
     "crates/secretctl-store",
     "crates/secretctl-browser-gateway",
@@ -31,9 +32,13 @@ secretctl-crypto = { path = "crates/secretctl-crypto" }
 secretctl-policy = { path = "crates/secretctl-policy" }
 secretctl-capability = { path = "crates/secretctl-capability" }
 secretctl-providers = { path = "crates/secretctl-providers" }
+secretctl-provider-macos = { path = "crates/secretctl-provider-macos" }
 secretctl-audit = { path = "crates/secretctl-audit" }
 secretctl-store = { path = "crates/secretctl-store" }
 secretctl-browser-gateway = { path = "crates/secretctl-browser-gateway" }
+
+# Platform & Keychain
+security-framework = "3.2"
 
 # Serialization & Data Formats
 serde = { version = "1.0", features = ["derive"] }

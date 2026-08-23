@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[lib]
+name = "secretctld"
+path = "src/lib.rs"
+
 [[bin]]
 name = "secretctld"
 path = "src/main.rs"
@@ -17,10 +21,23 @@ secretctl-crypto = { workspace = true }
 secretctl-policy = { workspace = true }
 secretctl-capability = { workspace = true }
 secretctl-providers = { workspace = true }
+secretctl-provider-macos = { workspace = true }
 secretctl-audit = { workspace = true }
 secretctl-store = { workspace = true }
 secretctl-browser-gateway = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

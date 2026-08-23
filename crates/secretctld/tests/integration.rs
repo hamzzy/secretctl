@@ -1,0 +1,327 @@
+use chrono::Utc;
+use secretctl_crypto::KeyPair;
+use secretctl_domain::{
+    ActionKind, AgentId, BrowserSession, BrowserSessionId, BrowserSessionState, CanonicalOrigin,
+    RecipeField, RecipeId, RequestId, SiteRecipe,
+};
+use secretctl_policy::{
+    DestinationRule, PolicyDocument, PolicyEvaluator, PolicyRule, RuleConditions,
+};
+use secretctl_protocol::{
+    ActionRequestParams, ExecutorConsumeParams, ExecutorContextPayload, ExecutorPrepareParams,
+    ExecutorResultParams, TargetOriginConstraint,
+};
+use secretctl_providers::{MemorySecretProvider, SecretProvider};
+use secretctl_store::SqliteStore;
+use secretctld::state::BrokerState;
+use std::sync::Arc;
+
+async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin) {
+    let broker_key = KeyPair::generate();
+    let store = SqliteStore::in_memory().expect("in-memory db");
+    let provider = Arc::new(MemorySecretProvider::new());
+    provider
+        .store_secret("github-work", b"super_secret_password_123")
+        .await
+        .expect("stored secret");
+
+    let origin = CanonicalOrigin::parse("https://github.com:443").expect("valid origin");
+
+    let rule = PolicyRule {
+        id: secretctl_domain::RuleId::parse("rule_github").unwrap(),
+        description: Some("Allow github login".to_string()),
+        effect: secretctl_domain::PolicyEffect::Allow,
+        principals: vec!["*".to_string()],
+        credentials: vec!["github-work".to_string()],
+        actions: vec![ActionKind::AuthenticatePassword],
+        destinations: vec![DestinationRule {
+            origin: origin.clone(),
+            path_prefix: Some("/login".to_string()),
+        }],
+        conditions: RuleConditions {
+            browser_assurance: Some("managed".to_string()),
+            require_user_presence: false,
+            max_uses: 1,
+            max_ttl_seconds: 30,
+        },
+    };
+
+    let policy_doc = PolicyDocument {
+        version: "1.0".to_string(),
+        rules: vec![rule],
+    };
+    let evaluator = PolicyEvaluator::new(policy_doc);
+
+    let state = BrokerState::new(broker_key, "key-test-1", store, provider, evaluator);
+
+    // Register test site recipe
+    let recipe = SiteRecipe {
+        recipe_id: RecipeId::parse("rcp_github_login").unwrap(),
+        version: 1,
+        name: "GitHub Login".to_string(),
+        action: ActionKind::AuthenticatePassword,
+        top_origin: origin.clone(),
+        path_prefix: Some("/login".to_string()),
+        frame_origin: Some(origin.clone()),
+        fields: vec![RecipeField {
+            role: "password".to_string(),
+            selector: "input[type=password]".to_string(),
+            optional: false,
+            clear_first: true,
+        }],
+        submit: None,
+        success_indicators: None,
+        content_hash: vec![1, 2, 3],
+        enabled: true,
+    };
+    state.register_recipe(recipe);
+
+    // Register active browser session
+    let session_id = BrowserSessionId::new();
+    let session = BrowserSession {
+        session_id: session_id.clone(),
+        instance_id: secretctl_domain::BrowserInstanceId::new(),
+        extension_key_id: "ext-key-1".to_string(),
+        profile_id: "default-profile".to_string(),
+        assurance: "managed".to_string(),
+        state: BrowserSessionState::Active,
+        last_heartbeat_at: Utc::now(),
+    };
+    state.register_browser_session(session);
+
+    (state, session_id, origin)
+}
+
+#[tokio::test]
+async fn test_full_fake_executor_flow_success() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    let agent_id = AgentId::new();
+    let request_id = RequestId::new();
+
+    // 1. Agent requests action
+    let agent_req = ActionRequestParams {
+        request_id: request_id.clone(),
+        action: ActionKind::AuthenticatePassword,
+        identity: "github-work".to_string(),
+        target: TargetOriginConstraint {
+            origin: origin.clone(),
+            path_prefix: Some("/login".to_string()),
+        },
+        browser_session_id: session_id.clone(),
+        tab_hint: Some(1),
+        reason: "Test login flow".to_string(),
+        wait: true,
+        timeout_ms: 30000,
+        client_context: None,
+    };
+
+    let agent_resp = broker
+        .handle_action_request(agent_id, agent_req)
+        .await
+        .expect("action request should succeed");
+
+    assert_eq!(agent_resp.state, secretctl_domain::ActionRequestState::CapabilityIssued);
+    // Security check: Zero secrets in agent response!
+    let serialized_agent_resp = serde_json::to_string(&agent_resp).unwrap();
+    assert!(!serialized_agent_resp.contains("super_secret"));
+    assert!(!serialized_agent_resp.contains("password"));
+
+    // 2. Executor prepares context
+    let prep_context = ExecutorContextPayload {
+        browser_session_id: session_id.clone(),
+        tab_id: 1,
+        frame_id: 0,
+        document_id: "doc-1".to_string(),
+        navigation_epoch: 1,
+        top_origin: origin.clone(),
+        frame_origin: origin.clone(),
+        path_sha256: "path-hash".to_string(),
+        tls: true,
+        incognito: false,
+    };
+
+    let prep_resp = broker
+        .handle_executor_prepare(ExecutorPrepareParams {
+            context: prep_context.clone(),
+        })
+        .await
+        .expect("executor prepare should succeed");
+
+    assert!(prep_resp.prepared);
+    assert!(!prep_resp.matching_recipes.is_empty());
+
+    // 3. Obtain capability token from broker state
+    let token = {
+        let caps = broker.capabilities.lock().unwrap();
+        caps.values().next().unwrap().token.clone()
+    };
+
+    // 4. Executor consumes capability
+    let consume_params = ExecutorConsumeParams {
+        capability_token: token.clone(),
+        session_signature: "mock-sig".to_string(),
+        current_context: prep_context,
+    };
+
+    let consume_resp = broker
+        .handle_executor_consume(consume_params)
+        .await
+        .expect("consume should succeed");
+
+    assert_eq!(consume_resp.fields.len(), 1);
+    assert_eq!(consume_resp.fields[0].encrypted_value, "super_secret_password_123");
+
+    // 5. Executor reports result
+    let result_params = ExecutorResultParams {
+        execution_id: consume_resp.execution_id,
+        status: "completed".to_string(),
+        result_code: "LOGIN_SUCCESS".to_string(),
+        evidence: None,
+    };
+
+    let result_resp = broker
+        .handle_executor_result(result_params)
+        .await
+        .expect("result report should succeed");
+
+    assert!(result_resp.acknowledged);
+}
+
+#[tokio::test]
+async fn test_concurrent_consume_race_condition() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    let agent_id = AgentId::new();
+    let request_id = RequestId::new();
+
+    // 1. Issue capability
+    let agent_req = ActionRequestParams {
+        request_id: request_id.clone(),
+        action: ActionKind::AuthenticatePassword,
+        identity: "github-work".to_string(),
+        target: TargetOriginConstraint {
+            origin: origin.clone(),
+            path_prefix: Some("/login".to_string()),
+        },
+        browser_session_id: session_id.clone(),
+        tab_hint: Some(1),
+        reason: "Test concurrent race".to_string(),
+        wait: true,
+        timeout_ms: 30000,
+        client_context: None,
+    };
+
+    broker
+        .handle_action_request(agent_id, agent_req)
+        .await
+        .unwrap();
+
+    let token = {
+        let caps = broker.capabilities.lock().unwrap();
+        caps.values().next().unwrap().token.clone()
+    };
+
+    let context = ExecutorContextPayload {
+        browser_session_id: session_id.clone(),
+        tab_id: 1,
+        frame_id: 0,
+        document_id: "doc-1".to_string(),
+        navigation_epoch: 1,
+        top_origin: origin.clone(),
+        frame_origin: origin.clone(),
+        path_sha256: "path-hash".to_string(),
+        tls: true,
+        incognito: false,
+    };
+
+    // 2. Launch 10 concurrent consume attempts
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let b = broker.clone();
+        let t = token.clone();
+        let ctx = context.clone();
+        handles.push(tokio::spawn(async move {
+            b.handle_executor_consume(ExecutorConsumeParams {
+                capability_token: t,
+                session_signature: "mock".to_string(),
+                current_context: ctx,
+            })
+            .await
+        }));
+    }
+
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(_) => success_count += 1,
+            Err(err) => {
+                assert_eq!(err.code, secretctl_protocol::RpcErrorCode::CAPABILITY_CONSUMED.0);
+                failure_count += 1;
+            }
+        }
+    }
+
+    // Atomic invariant: exactly 1 winner, 9 rejected
+    assert_eq!(success_count, 1);
+    assert_eq!(failure_count, 9);
+}
+
+#[tokio::test]
+async fn test_epoch_invalidation_fails_closed() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    let agent_id = AgentId::new();
+
+    broker
+        .handle_action_request(
+            agent_id,
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin: origin.clone(),
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id.clone(),
+                tab_hint: Some(1),
+                reason: "Epoch test".to_string(),
+                wait: true,
+                timeout_ms: 30000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let token = {
+        let caps = broker.capabilities.lock().unwrap();
+        caps.values().next().unwrap().token.clone()
+    };
+
+    // Attempt consume with changed navigation epoch (e.g. 2 instead of 1)
+    let bad_context = ExecutorContextPayload {
+        browser_session_id: session_id.clone(),
+        tab_id: 1,
+        frame_id: 0,
+        document_id: "doc-1".to_string(),
+        navigation_epoch: 2, // Mismatch!
+        top_origin: origin.clone(),
+        frame_origin: origin.clone(),
+        path_sha256: "path-hash".to_string(),
+        tls: true,
+        incognito: false,
+    };
+
+    let consume_res = broker
+        .handle_executor_consume(ExecutorConsumeParams {
+            capability_token: token,
+            session_signature: "mock".to_string(),
+            current_context: bad_context,
+        })
+        .await;
+
+    assert!(consume_res.is_err());
+    let err = consume_res.unwrap_err();
+    assert_eq!(err.code, secretctl_protocol::RpcErrorCode::EPOCH_INVALIDATED.0);
+}

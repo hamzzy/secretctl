@@ -39,18 +39,18 @@ pub fn verify_and_consume_capability(
     }
 
     // 4. Check state and used count
+    if capability.state == CapabilityState::Consumed || capability.used_count >= capability.max_uses {
+        return Err(CapabilityError::AlreadyConsumed {
+            max: capability.max_uses,
+            used: capability.used_count,
+        });
+    }
+
     if capability.state != CapabilityState::Issued && capability.state != CapabilityState::Active {
         return Err(CapabilityError::Revoked(format!(
             "Capability in invalid state: {}",
             capability.state.as_str()
         )));
-    }
-
-    if capability.used_count >= capability.max_uses {
-        return Err(CapabilityError::AlreadyConsumed {
-            max: capability.max_uses,
-            used: capability.used_count,
-        });
     }
 
     // 5. Check origin binding
