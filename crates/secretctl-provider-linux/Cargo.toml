@@ -10,5 +10,3 @@ authors.workspace = true
 secretctl-crypto = { workspace = true }
 secretctl-providers = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true }
-zeroize = { workspace = true }

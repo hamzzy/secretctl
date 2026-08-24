@@ -94,7 +94,8 @@ async fn test_soak_repeated_actions_stress_and_invariant_verification() {
                 browser_assurance: Some("managed".to_string()),
                 require_user_presence: false,
                 max_uses: 10,
-                max_ttl_seconds: 120,
+                max_consume_ttl_seconds: 120,
+                max_execution_ttl_seconds: 120,
             },
         }],
     };

@@ -81,7 +81,8 @@ async fn setup_adversarial_broker() -> (
             browser_assurance: Some("managed".to_string()),
             require_user_presence: false,
             max_uses: 1,
-            max_ttl_seconds: 30,
+            max_consume_ttl_seconds: 30,
+            max_execution_ttl_seconds: 120,
         },
     };
 
@@ -481,4 +482,352 @@ fn test_attack_6_audit_hash_chain_tamper_detected() {
     let mut tampered = events.clone();
     tampered[1].previous_hash = vec![0u8; 32];
     assert!(verify_audit_chain(&tampered, &audit_keys).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Observation surface (page.read_text / page.snapshot_safe / locators)
+//
+// The gateway gained the ability to let an agent see a page. These tests exist
+// to hold the line that seeing a page is not the same as seeing what was typed
+// into it.
+// ---------------------------------------------------------------------------
+
+mod observation {
+    use secretctld::dom_view::{PageProjection, ResolveError, ViewLimits, node_is_protected};
+    use serde_json::{Value, json};
+
+    const CANARY: &str = "CANARY-PASSWORD-7f3a91";
+
+    fn element(tag: &str, node_id: u64, attributes: &[(&str, &str)], children: Value) -> Value {
+        let attrs: Vec<Value> = attributes
+            .iter()
+            .flat_map(|(name, value)| {
+                [
+                    Value::String((*name).into()),
+                    Value::String((*value).into()),
+                ]
+            })
+            .collect();
+        json!({
+            "nodeId": node_id,
+            "nodeType": 1,
+            "nodeName": tag.to_uppercase(),
+            "attributes": attrs,
+            "children": children,
+        })
+    }
+
+    fn text(value: &str) -> Value {
+        json!({"nodeType": 3, "nodeValue": value})
+    }
+
+    fn assert_canary_free(projection: &PageProjection) {
+        let serialized = serde_json::to_string(&projection.nodes).unwrap();
+        assert!(
+            !serialized.contains(CANARY),
+            "canary reached the element projection: {serialized}"
+        );
+        assert!(
+            !projection.text.contains(CANARY),
+            "canary reached the text projection: {}",
+            projection.text
+        );
+    }
+
+    /// A filled password lives in the element's `value` property, not the DOM,
+    /// but a page is free to mirror it into the `value` attribute. It must not
+    /// come back out through either the element list or the text read.
+    #[test]
+    fn filled_password_mirrored_into_the_value_attribute_does_not_escape() {
+        let page = element(
+            "form",
+            1,
+            &[],
+            json!([element(
+                "input",
+                2,
+                &[
+                    ("type", "password"),
+                    ("name", "password"),
+                    ("value", CANARY)
+                ],
+                json!([])
+            )]),
+        );
+        let projection = PageProjection::from_node(&page, &ViewLimits::default());
+        assert_canary_free(&projection);
+        assert!(projection.nodes[0].protected);
+    }
+
+    /// The page echoes the credential into visible text after submission.
+    #[test]
+    fn credential_echoed_into_a_protected_container_is_elided() {
+        let page = element(
+            "div",
+            1,
+            &[],
+            json!([
+                element("p", 2, &[], json!([text("Signed in")])),
+                element(
+                    "pre",
+                    3,
+                    &[("id", "debug-password-echo")],
+                    json!([text(CANARY)])
+                ),
+            ]),
+        );
+        let projection = PageProjection::from_node(&page, &ViewLimits::default());
+        assert_canary_free(&projection);
+        assert_eq!(projection.text, "Signed in");
+    }
+
+    /// An attacker-controlled page tries to smuggle the credential out as an
+    /// element's accessible name, which is the one page-authored string the
+    /// projection does return.
+    #[test]
+    fn credential_smuggled_through_labels_of_a_protected_field_is_dropped() {
+        for attribute in ["aria-label", "placeholder", "title", "value"] {
+            let page = element(
+                "input",
+                1,
+                &[("type", "password"), (attribute, CANARY)],
+                json!([]),
+            );
+            let projection = PageProjection::from_node(&page, &ViewLimits::default());
+            assert_canary_free(&projection);
+        }
+    }
+
+    /// The credential is placed in a script tag, an inline style, and a hidden
+    /// input — three places a DOM dump would surface it.
+    #[test]
+    fn credential_in_non_content_and_hidden_nodes_is_never_read() {
+        let page = element(
+            "body",
+            1,
+            &[],
+            json!([
+                element("script", 2, &[], json!([text(CANARY)])),
+                element("style", 3, &[], json!([text(CANARY)])),
+                element(
+                    "input",
+                    4,
+                    &[("type", "hidden"), ("name", "csrf"), ("value", CANARY)],
+                    json!([])
+                ),
+                element("p", 5, &[], json!([text("Welcome")])),
+            ]),
+        );
+        let projection = PageProjection::from_node(&page, &ViewLimits::default());
+        assert_canary_free(&projection);
+        assert_eq!(projection.text, "Welcome");
+    }
+
+    /// An OTP field named innocuously still has to be recognised, because the
+    /// autocomplete hint is what a real site uses.
+    #[test]
+    fn one_time_code_fields_are_protected_however_they_are_named() {
+        for attributes in [
+            vec![("type", "text"), ("autocomplete", "one-time-code")],
+            vec![("type", "text"), ("name", "totp")],
+            vec![("type", "text"), ("data-testid", "otp-input")],
+            vec![
+                ("type", "text"),
+                ("autocomplete", "section-login one-time-code"),
+            ],
+        ] {
+            let page = element("input", 1, &attributes, json!([]));
+            let projection = PageProjection::from_node(&page, &ViewLimits::default());
+            assert!(
+                projection.nodes[0].protected,
+                "not protected: {attributes:?}"
+            );
+        }
+    }
+
+    /// The projection and the typing guard must agree about what is protected.
+    /// If they disagree, an agent could type into a field the projection told
+    /// it was ordinary.
+    #[test]
+    fn projection_and_typing_guard_agree_on_protected_fields() {
+        let cases: Vec<Vec<(&str, &str)>> = vec![
+            vec![("type", "password")],
+            vec![("type", "text"), ("autocomplete", "current-password")],
+            vec![("type", "text"), ("name", "user_token")],
+            vec![("type", "text"), ("id", "cvv")],
+            vec![("type", "text"), ("name", "username")],
+            vec![("type", "email")],
+        ];
+        for attributes in cases {
+            let node = element("input", 1, &attributes, json!([]));
+            let projection = PageProjection::from_node(&node, &ViewLimits::default());
+            let via_projection = projection.nodes[0].protected;
+            let via_guard = node_is_protected(&json!({"node": node}));
+            assert_eq!(
+                via_projection, via_guard,
+                "projection and typing guard disagree for {attributes:?}"
+            );
+        }
+    }
+
+    /// A page that mutates between snapshot and action must not be able to
+    /// redirect the action onto a different control.
+    #[test]
+    fn a_reference_cannot_be_redirected_onto_a_swapped_control() {
+        let before = element(
+            "div",
+            1,
+            &[],
+            json!([element("button", 2, &[], json!([text("Sign in")]))]),
+        );
+        let snapshot = PageProjection::from_node(&before, &ViewLimits::default());
+        let reference = snapshot.nodes[0].reference.clone();
+
+        // Same position, different control.
+        let after = element(
+            "div",
+            1,
+            &[],
+            json!([element(
+                "button",
+                2,
+                &[],
+                json!([text("Delete everything")])
+            )]),
+        );
+        let after = PageProjection::from_node(&after, &ViewLimits::default());
+        assert_eq!(
+            after.resolve_reference(&reference),
+            Err(ResolveError::Stale)
+        );
+    }
+
+    /// Two identical controls must fail rather than resolve to the first one.
+    #[test]
+    fn a_decoy_control_makes_a_locator_ambiguous_rather_than_wrong() {
+        let page = element(
+            "div",
+            1,
+            &[],
+            json!([
+                element("button", 2, &[], json!([text("Confirm")])),
+                element("button", 3, &[], json!([text("Confirm")])),
+            ]),
+        );
+        let projection = PageProjection::from_node(&page, &ViewLimits::default());
+        assert_eq!(
+            projection.resolve_role("button", "Confirm"),
+            Err(ResolveError::Ambiguous)
+        );
+    }
+
+    /// An agent must not be able to enlarge its own view of a page.
+    #[test]
+    fn an_agent_cannot_raise_its_own_observation_limits() {
+        let limits = ViewLimits::clamped(Some(usize::MAX), Some(usize::MAX));
+        assert_eq!(limits.max_nodes, 250);
+        assert_eq!(limits.max_chars, 20_000);
+
+        let children: Vec<Value> = (0..500)
+            .map(|index| element("button", index + 2, &[], json!([text("Go")])))
+            .collect();
+        let page = element("div", 1, &[], Value::Array(children));
+        let projection = PageProjection::from_node(&page, &limits);
+        assert_eq!(projection.nodes.len(), 250);
+        assert!(projection.nodes_truncated);
+    }
+
+    /// Content inside an iframe belongs to a different origin and must not be
+    /// presented to the agent as part of the top-level page.
+    #[test]
+    fn a_hostile_iframe_cannot_inject_content_into_the_top_page_view() {
+        let mut frame = element("iframe", 2, &[("src", "https://evil.test/")], json!([]));
+        frame["contentDocument"] = element(
+            "body",
+            3,
+            &[],
+            json!([
+                element("button", 4, &[], json!([text("Sign in")])),
+                element("p", 5, &[], json!([text(CANARY)])),
+            ]),
+        );
+        let page = element(
+            "div",
+            1,
+            &[],
+            json!([frame, element("p", 6, &[], json!([text("Top page")]))]),
+        );
+        let projection = PageProjection::from_node(&page, &ViewLimits::default());
+        assert_canary_free(&projection);
+        assert_eq!(projection.text, "Top page");
+        assert!(projection.nodes.is_empty());
+    }
+}
+
+/// The gateway must not have gained an `evaluate`-class capability by way of
+/// the new observation methods. Absence, not denial.
+#[test]
+fn test_attack_observation_did_not_reintroduce_arbitrary_javascript() {
+    let filter = CdpFilter::new();
+    for method in [
+        "Runtime.evaluate",
+        "Runtime.callFunctionOn",
+        "Runtime.compileScript",
+        "Runtime.getProperties",
+        "Runtime.awaitPromise",
+        "DOM.getOuterHTML",
+        "DOMSnapshot.captureSnapshot",
+        "Accessibility.getFullAXTree",
+        "DOM.getContentQuads",
+        "DOM.resolveNode",
+        "DOM.getFlattenedDocument",
+        "Page.getResourceContent",
+    ] {
+        assert!(
+            filter.validate_cdp_command(method, None).is_err(),
+            "{method} must not be reachable"
+        );
+    }
+}
+
+/// Whole-page dumps must be denied at all times, not merely while a credential
+/// is being injected. A page can echo a secret into the DOM at any moment, and
+/// `page.snapshot_safe` is the only observation path that elides it.
+#[test]
+fn test_attack_whole_page_dumps_are_denied_outside_a_sensitive_window() {
+    let filter = CdpFilter::new();
+    assert!(!filter.has_sensitive_window());
+    for method in [
+        "DOMSnapshot.captureSnapshot",
+        "DOMSnapshot.getSnapshot",
+        "Accessibility.getFullAXTree",
+        "Accessibility.getRootAXNode",
+        "DOM.getOuterHTML",
+        "DOM.getFlattenedDocument",
+    ] {
+        assert!(
+            filter.validate_cdp_command(method, Some(1)).is_err(),
+            "{method} must be denied with no sensitive window active"
+        );
+    }
+}
+
+/// Every CDP method the observation path needs must be explicitly allowlisted,
+/// so that adding a feature cannot quietly widen the boundary.
+#[test]
+fn test_observation_uses_only_allowlisted_cdp_methods() {
+    let filter = CdpFilter::new();
+    for method in [
+        "DOM.getDocument",
+        "DOM.describeNode",
+        "DOM.getBoxModel",
+        "DOM.querySelectorAll",
+        "Page.getNavigationHistory",
+        "Page.navigateToHistoryEntry",
+    ] {
+        assert!(
+            filter.validate_cdp_command(method, None).is_ok(),
+            "{method} is required by the observation path"
+        );
+    }
 }

@@ -22,10 +22,10 @@ public enum ActionKind: String, Codable, Sendable {
 
     public var label: String {
         switch self {
-        case .authenticatePassword: return "Sign in"
-        case .authenticateTotp: return "Complete TOTP"
-        case .formSensitiveFill: return "Fill sensitive form"
-        case .oauthAuthorize: return "Authorize OAuth access"
+        case .authenticatePassword: return String(localized: "Sign in")
+        case .authenticateTotp: return String(localized: "Complete TOTP")
+        case .formSensitiveFill: return String(localized: "Fill sensitive form")
+        case .oauthAuthorize: return String(localized: "Authorize OAuth access")
         }
     }
 }
@@ -33,7 +33,16 @@ public enum ActionKind: String, Codable, Sendable {
 public enum RiskLevel: String, Codable, Sendable, Comparable {
     case low, medium, high, critical
 
-    public var label: String { rawValue.capitalized }
+    /// `rawValue.capitalized` would have been untranslatable — the severity
+    /// words have to be real strings to be a translator's problem.
+    public var label: String {
+        switch self {
+        case .low: return String(localized: "Low")
+        case .medium: return String(localized: "Medium")
+        case .high: return String(localized: "High")
+        case .critical: return String(localized: "Critical")
+        }
+    }
 
     private var order: Int {
         switch self {
@@ -55,6 +64,7 @@ public enum ProtectionState: String, Codable, Sendable {
     case blocked
     case protectionInterrupted = "protection_interrupted"
     case outcomeUncertain = "outcome_uncertain"
+    case completedEvidenceLost = "completed_evidence_lost"
     case disconnected
 
     public init(from decoder: Decoder) throws {
@@ -65,14 +75,15 @@ public enum ProtectionState: String, Codable, Sendable {
     /// Short line under the product name in the popover header.
     public var headline: String {
         switch self {
-        case .protected: return "Protected"
-        case .approvalRequired: return "Approval required"
-        case .sensitiveOperation: return "Sensitive operation"
-        case .completed: return "Completed"
-        case .blocked: return "Blocked"
-        case .protectionInterrupted: return "Protection interrupted"
-        case .outcomeUncertain: return "Outcome uncertain"
-        case .disconnected: return "Disconnected"
+        case .protected: return String(localized: "Protected")
+        case .approvalRequired: return String(localized: "Approval required")
+        case .sensitiveOperation: return String(localized: "Sensitive operation")
+        case .completed: return String(localized: "Completed")
+        case .blocked: return String(localized: "Blocked")
+        case .protectionInterrupted: return String(localized: "Protection interrupted")
+        case .outcomeUncertain: return String(localized: "Outcome uncertain")
+        case .completedEvidenceLost: return String(localized: "Completed — evidence lost")
+        case .disconnected: return String(localized: "Disconnected")
         }
     }
 
@@ -80,21 +91,22 @@ public enum ProtectionState: String, Codable, Sendable {
     /// colour alone, so this is the authoritative label for assistive tech.
     public var accessibilityDescription: String {
         switch self {
-        case .protected: return "secretctl: protected. No sensitive operation."
-        case .approvalRequired: return "secretctl: an authorization request is waiting for you."
-        case .sensitiveOperation: return "secretctl: a sensitive credential operation is in progress."
-        case .completed: return "secretctl: the last operation completed."
-        case .blocked: return "secretctl: an operation was blocked. The credential was not released."
-        case .protectionInterrupted: return "secretctl: browser protection was interrupted. Credential release halted."
-        case .outcomeUncertain: return "secretctl: the outcome of the last operation could not be verified."
-        case .disconnected: return "secretctl: the daemon is not reachable. Sensitive operations are disabled."
+        case .protected: return String(localized: "secretctl: protected. No sensitive operation.")
+        case .approvalRequired: return String(localized: "secretctl: an authorization request is waiting for you.")
+        case .sensitiveOperation: return String(localized: "secretctl: a sensitive credential operation is in progress.")
+        case .completed: return String(localized: "secretctl: the last operation completed.")
+        case .blocked: return String(localized: "secretctl: an operation was blocked. The credential was not released.")
+        case .protectionInterrupted: return String(localized: "secretctl: browser protection was interrupted. Credential release halted.")
+        case .outcomeUncertain: return String(localized: "secretctl: the outcome of the last operation could not be verified.")
+        case .completedEvidenceLost: return String(localized: "secretctl: the operation completed, but its audit evidence was lost. Do not retry.")
+        case .disconnected: return String(localized: "secretctl: the daemon is not reachable. Sensitive operations are disabled.")
         }
     }
 
     /// Whether this state should hold the user's attention until acknowledged.
     public var isAlarming: Bool {
         switch self {
-        case .blocked, .protectionInterrupted, .outcomeUncertain, .disconnected: return true
+        case .blocked, .protectionInterrupted, .outcomeUncertain, .completedEvidenceLost, .disconnected: return true
         default: return false
         }
     }
@@ -110,7 +122,7 @@ public struct FlowStep: Codable, Sendable, Hashable {
     public let optional: Bool
 }
 
-public struct AuthorizationRequest: Codable, Sendable, Identifiable {
+public struct AuthorizationRequest: Codable, Sendable, Identifiable, Equatable {
     public let approvalID: String
     public let requestID: String
     public let agentName: String

@@ -17,7 +17,10 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .framing import AsyncLengthPrefixedSocket
-from .types import ActionStatus, ExecuteRequest, ExecuteResult, SessionInfo
+from .types import (
+    ActionStatus, BrowserTab, ExecuteRequest, ExecuteResult, PageTextResult,
+    SafePageSnapshot, SessionInfo, Target,
+)
 
 SUITE = "X25519-HKDF-SHA256-CHACHA20POLY1305"
 PROHIBITED_RESPONSE_KEYS = (
@@ -83,13 +86,22 @@ def _parse_execute_result(result: object, request: ExecuteRequest) -> ExecuteRes
     )
     if state in {"completed", "capability_issued"}:
         return ExecuteResult(status=state, **common)
-    if state in {"denied", "expired", "cancelled", "indeterminate", "revoked", "failed"}:
+    if state in {
+        "denied", "expired", "cancelled", "indeterminate", "completed_evidence_lost",
+        "revoked", "failed",
+    }:
         candidate = result.get("result_code")
         code = candidate if isinstance(candidate, str) and candidate in KNOWN_ERROR_CODES else "INTERNAL_ERROR"
         return ExecuteResult(
             status=state, request_id=common["request_id"],
             code=code if isinstance(code, str) else state.upper(),
-            safe_message=f"Action ended in {state}", evidence_id=common["evidence_id"],
+            safe_message=(
+                "The action may have completed. Do not retry automatically."
+                if state in {"completed_evidence_lost", "indeterminate"}
+                else f"Action ended in {state}"
+            ),
+            retryable=state not in {"completed_evidence_lost", "indeterminate", "revoked"},
+            evidence_id=common["evidence_id"],
         )
     raise ValueError("Unknown action response state")
 
@@ -294,12 +306,48 @@ class AsyncSecretCtl:
             })
         except SecretCtlRpcError as error:
             return ExecuteResult(status="failed", request_id=request_id, code=error.code,
-                                 safe_message=str(error) or "Action failed")
+                                 safe_message=str(error) or "Action failed", retryable=False)
         except Exception:
             return ExecuteResult(status="failed", request_id=request_id, code="INTERNAL_ERROR",
-                                 safe_message="secretctl action failed")
+                                 safe_message="secretctl action failed", retryable=False)
         if not isinstance(result, dict):
             raise ValueError("Invalid action response")
+        return _parse_execute_result(result, request)
+
+    async def authenticate(
+        self,
+        credential: str,
+        reason: str,
+        *,
+        action: Optional[str] = None,
+        request_id: Optional[str] = None,
+        timeout_ms: int = 60000,
+        client_context: Optional[dict[str, str]] = None,
+    ) -> ExecuteResult:
+        params: dict[str, object] = {
+            "identity": credential, "reason": reason, "wait": True,
+            "timeout_ms": timeout_ms,
+        }
+        if action is not None:
+            params["action"] = action
+        if request_id is not None:
+            params["request_id"] = request_id
+        if client_context is not None:
+            params["client_context"] = client_context
+        result = await self._rpc("action.authenticate", params)
+        if not isinstance(result, dict):
+            raise ValueError("Invalid authentication response")
+        routed_action = result.get("action")
+        origin = result.get("verified_origin")
+        session_id = result.get("browser_session_id")
+        if not all(isinstance(value, str) for value in (routed_action, origin, session_id)):
+            raise ValueError("Broker did not return a verified authentication context")
+        request = ExecuteRequest(
+            request_id=result.get("request_id") if isinstance(result.get("request_id"), str) else request_id,
+            action=routed_action, identity=credential, target=Target(origin=origin),
+            browser_session_id=session_id, reason=reason, timeout_ms=timeout_ms,
+            client_context=client_context,
+        )
         return _parse_execute_result(result, request)
 
     async def status(self, request_id: str) -> ActionStatus:
@@ -312,17 +360,96 @@ class AsyncSecretCtl:
     async def session_info(self) -> SessionInfo:
         return SessionInfo.model_validate(await self._rpc("session.info", {}))
 
-    async def subscribe(self, request_id: str, poll_interval: float = 0.1) -> AsyncIterator[ActionStatus]:
+    async def tabs(self, session_id: str) -> list[BrowserTab]:
+        result = await self._rpc("browser.tabs", {"session_id": session_id})
+        if not isinstance(result, dict) or not isinstance(result.get("tabs"), list):
+            raise ValueError("Invalid browser tabs response")
+        return [BrowserTab.model_validate(tab) for tab in result["tabs"]]
+
+    async def open_tab(self, session_id: str, url: str = "about:blank") -> str:
+        result = await self._rpc("browser.open_tab", {"session_id": session_id, "url": url})
+        if not isinstance(result, dict) or not isinstance(result.get("tab_id"), str):
+            raise ValueError("Invalid browser tab response")
+        return result["tab_id"]
+
+    async def close_tab(self, session_id: str, tab_id: str) -> None:
+        await self._rpc("browser.close_tab", {"session_id": session_id, "tab_id": tab_id})
+
+    async def navigate(self, session_id: str, tab_id: str, url: str) -> None:
+        await self._rpc("browser.navigate", {"session_id": session_id, "tab_id": tab_id, "url": url})
+
+    async def reload(self, session_id: str, tab_id: str) -> None:
+        await self._rpc("browser.reload", {"session_id": session_id, "tab_id": tab_id})
+
+    async def click(self, session_id: str, tab_id: str, locator: dict[str, object]) -> None:
+        await self._rpc("page.click", {"session_id": session_id, "tab_id": tab_id, "locator": locator})
+
+    async def type_public(
+        self, session_id: str, tab_id: str, locator: dict[str, object], text: str,
+    ) -> None:
+        await self._rpc("page.type_public", {
+            "session_id": session_id, "tab_id": tab_id, "locator": locator, "text": text,
+        })
+
+    async def select(
+        self, session_id: str, tab_id: str, locator: dict[str, object], label: str,
+    ) -> None:
+        await self._rpc("page.select", {
+            "session_id": session_id, "tab_id": tab_id, "locator": locator, "label": label,
+        })
+
+    async def read_text(
+        self, session_id: str, tab_id: str, locator: Optional[dict[str, object]] = None,
+        max_chars: Optional[int] = None,
+    ) -> PageTextResult:
+        return PageTextResult.model_validate(await self._rpc("page.read_text", {
+            "session_id": session_id, "tab_id": tab_id,
+            "locator": locator, "max_chars": max_chars,
+        }))
+
+    async def snapshot_safe(
+        self, session_id: str, tab_id: str, max_nodes: Optional[int] = None,
+        check_visibility: bool = True,
+    ) -> SafePageSnapshot:
+        return SafePageSnapshot.model_validate(await self._rpc("page.snapshot_safe", {
+            "session_id": session_id, "tab_id": tab_id, "max_nodes": max_nodes,
+            "check_visibility": check_visibility,
+        }))
+
+    async def wait_for(
+        self, session_id: str, tab_id: str, condition: dict[str, object],
+        timeout_ms: int = 10000,
+    ) -> bool:
+        result = await self._rpc("page.wait_for", {
+            "session_id": session_id, "tab_id": tab_id, "condition": condition,
+            "timeout_ms": timeout_ms,
+        })
+        return isinstance(result, dict) and result.get("satisfied") is True
+
+    async def back(self, session_id: str, tab_id: str) -> None:
+        await self._rpc("browser.back", {"session_id": session_id, "tab_id": tab_id})
+
+    async def forward(self, session_id: str, tab_id: str) -> None:
+        await self._rpc("browser.forward", {"session_id": session_id, "tab_id": tab_id})
+
+    async def subscribe(self, request_id: str, timeout_ms: int = 30000) -> AsyncIterator[ActionStatus]:
         previous: Optional[tuple[str, Optional[str]]] = None
         while True:
-            status = await self.status(request_id)
+            params: dict[str, object] = {
+                "request_id": request_id, "timeout_ms": min(timeout_ms, 30000),
+            }
+            if previous is not None:
+                params["after_state"], params["after_detail"] = previous
+            status = ActionStatus.model_validate(await self._rpc("action.subscribe", params))
             current = (status.state, status.detail)
             if current != previous:
                 yield status
                 previous = current
-            if status.state in {"completed", "denied", "expired", "cancelled", "failed"}:
+            if status.state in {
+                "completed", "denied", "expired", "cancelled", "indeterminate",
+                "completed_evidence_lost", "revoked", "failed"
+            }:
                 return
-            await asyncio.sleep(poll_interval)
 
     async def close(self) -> None:
         if self.socket is not None:
@@ -357,6 +484,70 @@ class SecretCtl:
 
     def execute(self, request: ExecuteRequest) -> ExecuteResult:
         return asyncio.run_coroutine_threadsafe(self._client.execute(request), self._loop).result()
+
+    def authenticate(self, credential: str, reason: str, **kwargs: object) -> ExecuteResult:
+        return asyncio.run_coroutine_threadsafe(
+            self._client.authenticate(credential, reason, **kwargs), self._loop
+        ).result()
+
+    def tabs(self, session_id: str) -> list[BrowserTab]:
+        return asyncio.run_coroutine_threadsafe(self._client.tabs(session_id), self._loop).result()
+
+    def open_tab(self, session_id: str, url: str = "about:blank") -> str:
+        return asyncio.run_coroutine_threadsafe(self._client.open_tab(session_id, url), self._loop).result()
+
+    def close_tab(self, session_id: str, tab_id: str) -> None:
+        asyncio.run_coroutine_threadsafe(self._client.close_tab(session_id, tab_id), self._loop).result()
+
+    def navigate(self, session_id: str, tab_id: str, url: str) -> None:
+        asyncio.run_coroutine_threadsafe(self._client.navigate(session_id, tab_id, url), self._loop).result()
+
+    def reload(self, session_id: str, tab_id: str) -> None:
+        asyncio.run_coroutine_threadsafe(self._client.reload(session_id, tab_id), self._loop).result()
+
+    def click(self, session_id: str, tab_id: str, locator: dict[str, object]) -> None:
+        asyncio.run_coroutine_threadsafe(self._client.click(session_id, tab_id, locator), self._loop).result()
+
+    def type_public(self, session_id: str, tab_id: str, locator: dict[str, object], text: str) -> None:
+        asyncio.run_coroutine_threadsafe(
+            self._client.type_public(session_id, tab_id, locator, text), self._loop
+        ).result()
+
+    def select(
+        self, session_id: str, tab_id: str, locator: dict[str, object], label: str,
+    ) -> None:
+        asyncio.run_coroutine_threadsafe(
+            self._client.select(session_id, tab_id, locator, label), self._loop
+        ).result()
+
+    def read_text(
+        self, session_id: str, tab_id: str, locator: Optional[dict[str, object]] = None,
+        max_chars: Optional[int] = None,
+    ) -> PageTextResult:
+        return asyncio.run_coroutine_threadsafe(
+            self._client.read_text(session_id, tab_id, locator, max_chars), self._loop
+        ).result()
+
+    def snapshot_safe(
+        self, session_id: str, tab_id: str, max_nodes: Optional[int] = None,
+        check_visibility: bool = True,
+    ) -> SafePageSnapshot:
+        return asyncio.run_coroutine_threadsafe(
+            self._client.snapshot_safe(session_id, tab_id, max_nodes, check_visibility), self._loop
+        ).result()
+
+    def wait_for(
+        self, session_id: str, tab_id: str, condition: dict[str, object], timeout_ms: int = 10000,
+    ) -> bool:
+        return asyncio.run_coroutine_threadsafe(
+            self._client.wait_for(session_id, tab_id, condition, timeout_ms), self._loop
+        ).result()
+
+    def back(self, session_id: str, tab_id: str) -> None:
+        asyncio.run_coroutine_threadsafe(self._client.back(session_id, tab_id), self._loop).result()
+
+    def forward(self, session_id: str, tab_id: str) -> None:
+        asyncio.run_coroutine_threadsafe(self._client.forward(session_id, tab_id), self._loop).result()
 
     def status(self, request_id: str) -> ActionStatus:
         return asyncio.run_coroutine_threadsafe(self._client.status(request_id), self._loop).result()

@@ -49,6 +49,18 @@ impl RpcErrorCode {
     pub const EXECUTOR_FAILED: RpcErrorCode = RpcErrorCode(-32010);
     pub const RECIPE_NOT_FOUND: RpcErrorCode = RpcErrorCode(-32011);
     pub const USER_PRESENCE_UNAVAILABLE: RpcErrorCode = RpcErrorCode(-32012);
+    /// The agent asked to observe a page while a secret was in flight in that
+    /// browser session. Expected, and never an error the agent should retry
+    /// blindly; it should wait for the action to finish.
+    pub const OBSERVATION_BLOCKED: RpcErrorCode = RpcErrorCode(-32013);
+    /// A reference from an earlier snapshot no longer names the same element.
+    /// Re-snapshot rather than acting on whatever is there now.
+    pub const STALE_REFERENCE: RpcErrorCode = RpcErrorCode(-32014);
+    /// A locator matched more than one element. Never resolved by picking the
+    /// first: the agent must narrow it.
+    pub const LOCATOR_AMBIGUOUS: RpcErrorCode = RpcErrorCode(-32015);
+    pub const LOCATOR_NOT_FOUND: RpcErrorCode = RpcErrorCode(-32016);
+    pub const WAIT_TIMEOUT: RpcErrorCode = RpcErrorCode(-32017);
     pub const SECURITY_VIOLATION: RpcErrorCode = RpcErrorCode(-32099);
 }
 

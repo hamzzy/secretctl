@@ -3,16 +3,17 @@ use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use secretctl_domain::AgentId;
 use secretctl_protocol::{
-    ActionCancelParams, ActionRequestParams, ActionStatusParams, AgentDisableParams,
-    ApprovalDecideParams, BrowserCloseParams, BrowserLaunchParams, BrowserNavigateParams,
-    BrowserOpenTabParams, BrowserRegisterParams, BrowserSessionParams, BrowserTabParams,
-    CapabilityListParams, CapabilityRevokeParams, ExecutionNextParams, ExecutorConsumeParams,
-    ExecutorHeartbeatParams, ExecutorPrepareParams, ExecutorResultParams, GrantCreateParams,
-    GrantListParams, GrantRevokeParams, LengthPrefixedCodec, OAuthCallbackParams,
-    PageLocatorParams, PageTypePublicParams, PolicyReloadParams, RpcError, RpcErrorCode,
-    RpcRequest, RpcResponse, SessionAuthenticateParams, SessionAuthenticateResult,
-    SessionHelloParams, SessionHelloResult, SessionInfoResult, UiActivityParams,
-    session_auth_transcript,
+    ActionAuthenticateParams, ActionCancelParams, ActionRequestParams, ActionStatusParams,
+    ActionSubscribeParams, AgentDisableParams, ApprovalDecideParams, BrowserCloseParams,
+    BrowserLaunchParams, BrowserNavigateParams, BrowserOpenTabParams, BrowserRegisterParams,
+    BrowserSessionParams, BrowserTabParams, CapabilityListParams, CapabilityRevokeParams,
+    ExecutionNextParams, ExecutorConsumeParams, ExecutorHeartbeatParams, ExecutorPrepareParams,
+    ExecutorResultParams, GrantCreateParams, GrantListParams, GrantRevokeParams,
+    LengthPrefixedCodec, OAuthCallbackParams, PageLocatorParams, PageReadTextParams,
+    PageSelectParams, PageSnapshotParams, PageTypePublicParams, PageWaitForParams,
+    PolicyReloadParams, RpcError, RpcErrorCode, RpcRequest, RpcResponse, SessionAuthenticateParams,
+    SessionAuthenticateResult, SessionHelloParams, SessionHelloResult, SessionInfoResult,
+    UiActivityParams, session_auth_transcript,
 };
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
@@ -322,6 +323,46 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
                     )
                 }
             }
+            "action.authenticate" => {
+                if let Some(agent_id) = authenticated_agent.clone() {
+                    let params: ActionAuthenticateParams =
+                        serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                    let should_wait = params.wait;
+                    let timeout = std::time::Duration::from_millis(params.timeout_ms.min(60_000));
+                    match state.handle_action_authenticate(agent_id, params).await {
+                        Ok(mut result) => {
+                            if should_wait && !result.response.state.is_terminal() {
+                                let deadline = tokio::time::Instant::now() + timeout;
+                                loop {
+                                    if let Some(current) = state
+                                        .requests
+                                        .read()
+                                        .unwrap()
+                                        .get(&result.response.request_id)
+                                        .cloned()
+                                    {
+                                        result.response = current;
+                                        if result.response.state.is_terminal() {
+                                            break;
+                                        }
+                                    }
+                                    if tokio::time::Instant::now() >= deadline {
+                                        break;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                }
+                            }
+                            RpcResponse::success(id, serde_json::to_value(result)?)
+                        }
+                        Err(err) => RpcResponse::error(id, err),
+                    }
+                } else {
+                    RpcResponse::error(
+                        id,
+                        RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "session.hello required"),
+                    )
+                }
+            }
             "session.info" => {
                 if let Some(agent_id) = authenticated_agent.as_ref() {
                     RpcResponse::success(
@@ -349,6 +390,40 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
                     match state.handle_action_status(agent_id, params) {
                         Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
                         Err(err) => RpcResponse::error(id, err),
+                    }
+                } else {
+                    RpcResponse::error(
+                        id,
+                        RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "session.hello required"),
+                    )
+                }
+            }
+            "action.subscribe" => {
+                if let Some(agent_id) = authenticated_agent.as_ref() {
+                    let params: ActionSubscribeParams =
+                        serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                    let deadline = tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(params.timeout_ms.min(30_000));
+                    loop {
+                        match state.handle_action_status(
+                            agent_id,
+                            ActionStatusParams {
+                                request_id: params.request_id.clone(),
+                            },
+                        ) {
+                            Ok(status) => {
+                                let changed = params.after_state != Some(status.state)
+                                    || params.after_detail != status.detail;
+                                if changed
+                                    || status.state.is_terminal()
+                                    || tokio::time::Instant::now() >= deadline
+                                {
+                                    break RpcResponse::success(id, serde_json::to_value(status)?);
+                                }
+                            }
+                            Err(err) => break RpcResponse::error(id, err),
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                     }
                 } else {
                     RpcResponse::error(
@@ -424,6 +499,54 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
                 let params: PageTypePublicParams =
                     serde_json::from_value(rpc_req.params.unwrap_or_default())?;
                 match state.handle_page_type_public(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "page.select" if authenticated_agent.is_some() => {
+                let params: PageSelectParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_page_select(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "page.read_text" if authenticated_agent.is_some() => {
+                let params: PageReadTextParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_page_read_text(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "page.snapshot_safe" if authenticated_agent.is_some() => {
+                let params: PageSnapshotParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_page_snapshot_safe(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "page.wait_for" if authenticated_agent.is_some() => {
+                let params: PageWaitForParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_page_wait_for(params).await {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "browser.back" if authenticated_agent.is_some() => {
+                let params: BrowserTabParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_browser_back(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "browser.forward" if authenticated_agent.is_some() => {
+                let params: BrowserTabParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_browser_forward(params) {
                     Ok(result) => RpcResponse::success(id, result),
                     Err(error) => RpcResponse::error(id, error),
                 }

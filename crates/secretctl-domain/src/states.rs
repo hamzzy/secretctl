@@ -15,6 +15,7 @@ pub enum ActionRequestState {
     Expired,
     Cancelled,
     Indeterminate,
+    CompletedEvidenceLost,
     Revoked,
     Failed,
 }
@@ -28,6 +29,7 @@ impl ActionRequestState {
                 | Self::Expired
                 | Self::Cancelled
                 | Self::Indeterminate
+                | Self::CompletedEvidenceLost
                 | Self::Revoked
                 | Self::Failed
         )
@@ -59,6 +61,7 @@ impl ActionRequestState {
             (_, Self::Expired)
             | (_, Self::Cancelled)
             | (_, Self::Indeterminate)
+            | (_, Self::CompletedEvidenceLost)
             | (_, Self::Revoked)
             | (_, Self::Failed) => true,
             _ => false,
@@ -87,6 +90,7 @@ impl ActionRequestState {
             Self::Expired => "expired",
             Self::Cancelled => "cancelled",
             Self::Indeterminate => "indeterminate",
+            Self::CompletedEvidenceLost => "completed_evidence_lost",
             Self::Revoked => "revoked",
             Self::Failed => "failed",
         }
@@ -207,11 +211,15 @@ pub enum ExecutionState {
     Completed,
     Failed,
     Indeterminate,
+    CompletedEvidenceLost,
 }
 
 impl ExecutionState {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Indeterminate)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Indeterminate | Self::CompletedEvidenceLost
+        )
     }
 
     pub fn transition_to(&self, next: ExecutionState) -> Result<ExecutionState, DomainError> {
@@ -228,6 +236,7 @@ impl ExecutionState {
                 | (Self::Consuming, Self::Completed)
                 | (Self::Consuming, Self::Failed)
                 | (Self::Consuming, Self::Indeterminate)
+                | (Self::Consuming, Self::CompletedEvidenceLost)
                 | (Self::Prepared, Self::Failed)
         );
 
@@ -248,6 +257,7 @@ impl ExecutionState {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Indeterminate => "indeterminate",
+            Self::CompletedEvidenceLost => "completed_evidence_lost",
         }
     }
 }
@@ -282,5 +292,20 @@ mod tests {
         assert!(state.is_terminal());
 
         assert!(state.transition_to(CapabilityState::Active).is_err());
+    }
+
+    #[test]
+    fn completed_evidence_lost_is_terminal_and_non_retryable() {
+        let action = ActionRequestState::Executing
+            .transition_to(ActionRequestState::CompletedEvidenceLost)
+            .unwrap();
+        assert!(action.is_terminal());
+        assert!(action.transition_to(ActionRequestState::Executing).is_err());
+
+        let execution = ExecutionState::Consuming
+            .transition_to(ExecutionState::CompletedEvidenceLost)
+            .unwrap();
+        assert!(execution.is_terminal());
+        assert!(execution.transition_to(ExecutionState::Consuming).is_err());
     }
 }

@@ -144,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         ],
         submit: None,
         success_indicators: None,
+        oauth: None,
         content_hash: vec![1, 2, 3],
         enabled: true,
     });

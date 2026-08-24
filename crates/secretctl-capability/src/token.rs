@@ -4,8 +4,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use secretctl_crypto::{KeyPair, sha256_digest, verify_signature};
 use secretctl_domain::{
-    ActionKind, AgentId, BrowserSessionId, CanonicalOrigin, Capability, CapabilityId,
-    CapabilityState, CredentialId, RecipeId, RequestId,
+    ActionKind, AgentId, BrowserSessionId, CanonicalOrigin, Capability, CapabilityDeadlines,
+    CapabilityId, CapabilityState, CredentialId, FlowBinding, FlowId, FlowStepId, RecipeId,
+    RequestId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -57,11 +58,19 @@ struct CapabilityClaimsWire {
     #[n(19)]
     iat: i64,
     #[n(20)]
-    exp: i64,
+    consume_deadline: i64,
     #[n(21)]
     max_uses: u32,
     #[n(22)]
     issuer_key_id: String,
+    #[n(23)]
+    execution_deadline: i64,
+    #[n(24)]
+    flow_id: Option<String>,
+    #[n(25)]
+    step_id: Option<String>,
+    #[n(26)]
+    step_deadline: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +95,16 @@ pub struct CapabilityClaims {
     pub policy_hash: Vec<u8>,
     pub nbf: i64,
     pub iat: i64,
-    pub exp: i64,
+    /// Deadline for prepare, commit, and secret release. This is the only
+    /// deadline the runtime checks before consuming.
+    pub consume_deadline: i64,
+    /// Deadline for the action to complete once consumed. Carried so the
+    /// runtime can bound its own work, never as grounds to refuse a consume
+    /// that is still inside `consume_deadline`.
+    pub execution_deadline: i64,
+    pub step_deadline: Option<i64>,
+    pub flow_id: Option<FlowId>,
+    pub step_id: Option<FlowStepId>,
     pub max_uses: u32,
     pub issuer_key_id: String,
 }
@@ -114,7 +132,11 @@ impl From<&CapabilityClaims> for CapabilityClaimsWire {
             policy_hash: value.policy_hash.clone(),
             nbf: value.nbf,
             iat: value.iat,
-            exp: value.exp,
+            consume_deadline: value.consume_deadline,
+            execution_deadline: value.execution_deadline,
+            step_deadline: value.step_deadline,
+            flow_id: value.flow_id.as_ref().map(ToString::to_string),
+            step_id: value.step_id.as_ref().map(ToString::to_string),
             max_uses: value.max_uses,
             issuer_key_id: value.issuer_key_id.clone(),
         }
@@ -150,7 +172,21 @@ impl TryFrom<CapabilityClaimsWire> for CapabilityClaims {
             policy_hash: value.policy_hash,
             nbf: value.nbf,
             iat: value.iat,
-            exp: value.exp,
+            consume_deadline: value.consume_deadline,
+            execution_deadline: value.execution_deadline,
+            step_deadline: value.step_deadline,
+            flow_id: value
+                .flow_id
+                .as_deref()
+                .map(FlowId::parse)
+                .transpose()
+                .map_err(invalid)?,
+            step_id: value
+                .step_id
+                .as_deref()
+                .map(FlowStepId::parse)
+                .transpose()
+                .map_err(invalid)?,
             max_uses: value.max_uses,
             issuer_key_id: value.issuer_key_id,
         })
@@ -275,11 +311,22 @@ pub fn mint_capability(
     recipe_hash: Vec<u8>,
     policy_hash: Vec<u8>,
     issued_at: DateTime<Utc>,
-    ttl_seconds: u64,
+    deadlines: CapabilityDeadlines,
+    flow: Option<FlowBinding>,
     max_uses: u32,
 ) -> (Capability, String) {
     let capability_id = CapabilityId::new();
-    let expires_at = issued_at + chrono::Duration::seconds(ttl_seconds as i64);
+    // Two independent windows. `consume_deadline` bounds how long the runtime
+    // has to take delivery of the secret; `execution_deadline` bounds how long
+    // the resulting action may take. Both are measured from mint time, but only
+    // the first is a precondition for release.
+    let consume_deadline =
+        issued_at + chrono::Duration::seconds(deadlines.consume_ttl_seconds as i64);
+    let execution_deadline =
+        issued_at + chrono::Duration::seconds(deadlines.execution_ttl_seconds as i64);
+    let step_deadline = deadlines
+        .step_ttl_seconds
+        .map(|seconds| issued_at + chrono::Duration::seconds(seconds as i64));
 
     let claims = CapabilityClaims {
         v: 1,
@@ -302,7 +349,11 @@ pub fn mint_capability(
         policy_hash: policy_hash.clone(),
         nbf: issued_at.timestamp() - 1,
         iat: issued_at.timestamp(),
-        exp: expires_at.timestamp(),
+        consume_deadline: consume_deadline.timestamp(),
+        execution_deadline: execution_deadline.timestamp(),
+        step_deadline: step_deadline.map(|deadline| deadline.timestamp()),
+        flow_id: flow.as_ref().map(|binding| binding.flow_id.clone()),
+        step_id: flow.as_ref().map(|binding| binding.step_id.clone()),
         max_uses,
         issuer_key_id: issuer_key_id.to_string(),
     };
@@ -334,7 +385,11 @@ pub fn mint_capability(
         max_uses,
         used_count: 0,
         issued_at,
-        expires_at,
+        consume_deadline,
+        execution_deadline,
+        step_deadline,
+        flow_id: flow.as_ref().map(|binding| binding.flow_id.clone()),
+        step_id: flow.map(|binding| binding.step_id),
         revoked_reason: None,
     };
 
@@ -378,6 +433,14 @@ pub fn parse_and_verify_token_with_keys(
 mod tests {
     use super::*;
 
+    fn test_deadlines(seconds: u64) -> CapabilityDeadlines {
+        CapabilityDeadlines {
+            consume_ttl_seconds: seconds,
+            execution_ttl_seconds: 120,
+            step_ttl_seconds: None,
+        }
+    }
+
     #[test]
     fn test_capability_mint_and_verify() {
         let broker_key = KeyPair::generate();
@@ -405,7 +468,8 @@ mod tests {
             vec![1, 2, 3],
             vec![4, 5, 6],
             Utc::now(),
-            30,
+            test_deadlines(30),
+            None,
             1,
         );
 
@@ -441,7 +505,8 @@ mod tests {
             vec![1],
             vec![2],
             Utc::now(),
-            30,
+            test_deadlines(30),
+            None,
             1,
         );
         let active_old =

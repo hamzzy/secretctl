@@ -149,6 +149,118 @@ legible rather than looking like a hang.
 
 ---
 
+## Production posture
+
+**Signing.** `build-app.sh` enables the hardened runtime and verifies the
+signature on every build. Set `SECRETCTL_SIGN_IDENTITY` to a Developer ID
+Application identity for a distributable build; the script then prints the
+notarization steps. Without it the bundle is ad-hoc signed, which works locally
+at the cost described above.
+
+**No App Sandbox.** The app's job is to reach `~/.config/secretctl/run/admin.sock`,
+and a sandboxed process cannot open a Unix socket outside its container. The
+alternatives are worse: a temporary-exception entitlement for the home directory
+is *broader* than being unsandboxed, and relocating the socket would change the
+daemon's contract with the CLI and every SDK. The reasoning is written into
+`Resources/secretctl.entitlements`, which takes no hardened-runtime exceptions:
+no JIT, no unsigned executable memory, no library-validation exemption, no Apple
+Events, no camera, microphone or location, and no network sockets of any kind.
+
+**Screen capture.** Authorization surfaces are excluded from screen recording,
+screen sharing and screenshots by default (`NSWindow.sharingType = .none`). The
+approval window is the one place that names an account and a destination
+together; with this on, a shared screen shows that a decision is happening, not
+what it is about. There is a switch in Settings for anyone who needs the
+opposite.
+
+**Logging.** `Diagnostics` writes to the unified system log:
+
+    log stream --predicate 'subsystem == "com.secretctl.menubar"'
+
+Machine facts are logged publicly — protection states, error symbols, decision
+outcomes. Anything that identifies an account or destination is `.private`, so
+it is redacted in anyone else's copy of the log. Credential material never
+reaches this process at all.
+
+**Polling cost.** Status and pending work are read every 1.5s idle and every
+400ms during an operation, because the menu-bar glyph and notifications depend
+on them. Recent activity is a SQLite query on the daemon side and almost never
+changes between ticks, so it is read every 6s instead — immediately on a state
+change or while an operation is in flight.
+
+---
+
+## The approval prompt is an adversarial interface
+
+Per §14.3 of the technical PRD. The prompt renders text written by the thing
+asking for permission, and the attacker's goal is not to break the crypto — it
+is to make a tired human click Authorize on a different action than the one they
+think they are approving. What defends against that:
+
+**Sanitization** (`AgentText`). The broker strips bidi controls and C0/C1 on the
+way out and caps the string. This is the second layer, and it is not redundant:
+NFC normalization, zero-width and tag-character removal, terminal escape
+sequences (including a payload whose `ESC` the broker already ate, leaving
+`[31m` as visible text), combining-mark limiting, whitespace collapsing, and a
+200-character display cap with the cut made visible. Rendered with
+`Text(verbatim:)`, so Markdown and link syntax are never interpreted.
+
+**Confusable detection.** Text is folded to a perceptual skeleton — Cyrillic,
+Greek and Armenian lookalikes mapped to Latin, diacritics and punctuation
+dropped — and compared against the broker's own words and the verified origin.
+`ѕесretctl` and `gіthub.com` both match. The offending phrase is replaced with
+`[removed: text imitating secretctl]` and the prompt says so.
+
+**Subordination.** The reason renders collapsed by default under a fixed
+`Untrusted agent-supplied text` label. Expanding it is a deliberate act, so the
+default state of the window cannot be filled with someone else's argument.
+
+**Fixed wording.** `ApprovalChrome.affirmativeLabel` is always
+`Authorize this exact action once`; the negative is always `Deny`. Constants, so
+a test can assert they do not vary with input.
+
+**No keyboard approval, no focus stealing, no pre-focus.** The affirmative
+button is not the default action and the window is ordered front *without* being
+made key and without activating the app, so a keystroke aimed at whatever the
+person was actually doing cannot land on it. Deny keeps its Escape shortcut —
+denying early is always safe.
+
+**A 400 ms settle interval.** The affirmative button is inert after the prompt
+appears, so a click already travelling toward whatever was underneath is not
+accepted as an authorization.
+
+**No stacking.** One prompt at a time; a second request queues rather than
+overlaying or reordering. A pile of prompts is how someone approves the wrong
+one.
+
+**Rate limiting.** At most one prompt per 10 s and five per minute, per agent ×
+credential. A throttled request is *not* dropped — the daemon still holds it and
+the popover still lists it. Only the interruption is suppressed; suppressing the
+request would be a security decision, and this process does not make those.
+
+**Close, don't refresh.** If the approval leaves the daemon's pending set for
+any reason other than the decision the user just made, the window replaces
+itself with an explanation instead of re-binding to something else. A prompt
+whose contents mutate under the cursor is forbidden.
+
+`AdversarialApprovalTests` covers the fixture list from §14.3.5: persuasion,
+fake urgency, imitated field rows and buttons, bidi reordering, homoglyph
+origins, ANSI escapes, Markdown links, zalgo stacks, and claims of a different
+origin or credential.
+
+### What is not done here
+
+The spec wants a `security.approval_text_impersonation` audit event when
+confusable text is caught. The app cannot write to the hash-chained audit log —
+only the broker can — so it currently logs the detection and shows it in the
+prompt. Emitting the audit event needs a daemon-side hook. The same applies to
+`approval.prompt_shown` / `approval.dismissed` / `approval.rate_limited`
+telemetry (§14.3.4): the rate limiter here throttles prompts, but the broker has
+no rate limiting of its own, so an agent can still queue requests as fast as it
+likes.
+
+---
+
 ## Testing the decision path for real
 
 The riskiest thing in this client is not the crypto — the vectors pin that. It

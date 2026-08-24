@@ -39,6 +39,23 @@ fn default_timeout_ms() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionAuthenticateParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<ActionKind>,
+    pub identity: String,
+    pub reason: String,
+    #[serde(default = "default_true")]
+    pub wait: bool,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionResponseResult {
     pub request_id: RequestId,
     pub state: ActionRequestState,
@@ -55,9 +72,34 @@ pub struct ActionResponseResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionAuthenticateResult {
+    #[serde(flatten)]
+    pub response: ActionResponseResult,
+    pub action: ActionKind,
+    pub verified_origin: CanonicalOrigin,
+    pub browser_session_id: BrowserSessionId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionStatusParams {
     pub request_id: RequestId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionSubscribeParams {
+    pub request_id: RequestId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_state: Option<ActionRequestState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_detail: Option<String>,
+    #[serde(default = "default_subscribe_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_subscribe_timeout_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

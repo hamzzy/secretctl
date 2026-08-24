@@ -141,8 +141,25 @@ struct PopoverView: View {
                 InterruptionNotice(onDetails: onOpenActivity)
             } else if store.protection == .outcomeUncertain {
                 UncertainOutcomeNotice(onDetails: onOpenActivity)
+            } else if store.protection == .completedEvidenceLost {
+                EvidenceLostNotice(onDetails: onOpenActivity)
             } else if store.protection == .disconnected {
                 DisconnectedNotice(failure: store.lastFailure, connecting: !store.hasConnectedOnce)
+            } else if store.protection.isAlarming {
+                // A state that wants attention but has no bespoke panel yet.
+                // Being vague is bad; saying "nothing is happening" would be
+                // false, which is worse.
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(store.protection.headline, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.orange)
+                    Text(store.protection.accessibilityDescription)
+                        .font(.system(size: 11))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("View details", action: onOpenActivity)
+                        .buttonStyle(LinkPressStyle())
+                        .font(.system(size: 11))
+                }
             } else {
                 Text("No sensitive operation")
                     .font(.system(size: 12))
@@ -303,6 +320,29 @@ struct UncertainOutcomeNotice: View {
                 .fixedSize(horizontal: false, vertical: true)
             Button("View details", action: onDetails)
                 .buttonStyle(.link)
+                .font(.system(size: 11))
+        }
+    }
+}
+
+/// The operation finished, but its audit record did not.
+///
+/// Distinct from Outcome uncertain: there, secretctl does not know whether the
+/// credential was used. Here it knows that it was, and cannot prove it
+/// afterwards — which matters for anyone who has to reconstruct what happened.
+struct EvidenceLostNotice: View {
+    let onDetails: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Completed — evidence lost", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text("The credential operation finished, but secretctl could not record proof of it. The action did happen — do not retry it on the assumption that it did not.")
+                .font(.system(size: 11))
+                .fixedSize(horizontal: false, vertical: true)
+            Button("View details", action: onDetails)
+                .buttonStyle(LinkPressStyle())
                 .font(.system(size: 11))
         }
     }

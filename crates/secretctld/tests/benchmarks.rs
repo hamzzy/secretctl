@@ -39,7 +39,8 @@ async fn test_benchmark_policy_decision_budget_p95_under_5ms_at_1000_rules() {
                 browser_assurance: Some("managed".to_string()),
                 require_user_presence: false,
                 max_uses: 1,
-                max_ttl_seconds: 30,
+                max_consume_ttl_seconds: 30,
+                max_execution_ttl_seconds: 120,
             },
         });
     }
@@ -104,7 +105,12 @@ async fn test_benchmark_capability_mint_and_verify_roundtrip_budget_under_10ms()
             vec![1, 2, 3],
             vec![4, 5, 6],
             Utc::now(),
-            60,
+            secretctl_domain::CapabilityDeadlines {
+                consume_ttl_seconds: 60,
+                execution_ttl_seconds: 120,
+                step_ttl_seconds: None,
+            },
+            None,
             1,
         );
 
@@ -185,7 +191,8 @@ async fn test_benchmark_agent_rpc_latency_budget_under_50ms() {
                 browser_assurance: Some("managed".to_string()),
                 require_user_presence: false,
                 max_uses: 10,
-                max_ttl_seconds: 60,
+                max_consume_ttl_seconds: 60,
+                max_execution_ttl_seconds: 120,
             },
         }],
     };

@@ -20,6 +20,7 @@ struct StandingAuthorizationSheet: View {
     @State private var isWorking = false
     @State private var failure: ErrorPresentation?
     @State private var presenceNotice: String?
+    @State private var hasSettled = false
 
     private let ttlChoices = [1, 7, 30, 90]
 
@@ -55,15 +56,23 @@ struct StandingAuthorizationSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 if isWorking { ProgressView().controlSize(.small) }
+                // This approves the pending request as well as minting the
+                // grant, so it is an affirmative action and gets the same
+                // treatment as the one on the prompt: no keyboard shortcut,
+                // and inert until the sheet has settled.
                 Button("Create authorization") { Task { await create() } }
                     .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
+                    .disabled(!hasSettled)
             }
             .disabled(isWorking)
             .padding(20)
         }
         .frame(width: 440)
         .frame(minHeight: 460)
+        .task {
+            try? await Task.sleep(for: ApprovalChrome.settleInterval)
+            hasSettled = true
+        }
     }
 
     private var scope: some View {

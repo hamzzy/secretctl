@@ -25,13 +25,13 @@ public enum InstallationSigningKey {
         public var errorDescription: String? {
             switch self {
             case .notFound:
-                return "secretctl is not set up on this Mac yet. Run `secretctl init` to create an installation."
+                return String(localized: "secretctl is not set up on this Mac yet. Run `secretctl init` to create an installation.")
             case .accessDenied:
-                return "macOS did not allow secretctl to read its installation key from the Keychain."
+                return String(localized: "macOS did not allow secretctl to read its installation key from the Keychain.")
             case .malformed:
-                return "The installation key in the Keychain is not a valid signing key."
+                return String(localized: "The installation key in the Keychain is not a valid signing key.")
             case .keychain(let status):
-                return "The Keychain returned an unexpected error (\(status))."
+                return String(localized: "The Keychain returned an unexpected error (\(status)).")
             }
         }
     }

@@ -1,7 +1,7 @@
 use crate::actions::ActionKind;
 use crate::id::{
     AgentId, ApprovalId, BrowserInstanceId, BrowserSessionId, CapabilityId, CredentialId, EventId,
-    ExecutionId, GrantId, RecipeId, RequestId, RuleId,
+    ExecutionId, FlowId, FlowStepId, GrantId, RecipeId, RequestId, RuleId,
 };
 use crate::origin::CanonicalOrigin;
 use crate::states::{ActionRequestState, BrowserSessionState, CapabilityState, ExecutionState};
@@ -254,8 +254,56 @@ pub struct PolicyDecision {
     pub policy_hash: Vec<u8>,
     pub require_user_presence: bool,
     pub max_uses: u32,
-    pub ttl_seconds: u64,
+    /// How long the runtime has to prepare, commit, and receive the secret.
+    /// A hard security deadline: short, and expiring before consumption proves
+    /// no secret was released.
+    pub consume_ttl_seconds: u64,
+    /// How long the resulting login is allowed to take, measured from
+    /// consumption. Deliberately longer and deliberately separate: a two-step
+    /// login routinely exceeds the secret-release window in wall clock, and
+    /// collapsing the two forces a choice between an unsafely long secret
+    /// window and a login that always times out.
+    pub execution_ttl_seconds: u64,
 }
+
+/// The four deadlines a capability carries, expressed as durations at mint time.
+///
+/// They are passed together, and named, so that a caller cannot accidentally
+/// supply the secret-release window where the completion window was meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityDeadlines {
+    pub consume_ttl_seconds: u64,
+    pub execution_ttl_seconds: u64,
+    pub step_ttl_seconds: Option<u64>,
+}
+
+impl CapabilityDeadlines {
+    pub fn from_policy(decision: &PolicyDecision) -> Self {
+        Self {
+            consume_ttl_seconds: decision.consume_ttl_seconds,
+            execution_ttl_seconds: decision.execution_ttl_seconds,
+            step_ttl_seconds: None,
+        }
+    }
+
+    pub fn with_step(mut self, step_ttl_seconds: Option<u64>) -> Self {
+        self.step_ttl_seconds = step_ttl_seconds;
+        self
+    }
+}
+
+/// Which flow step a capability belongs to, when it belongs to one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowBinding {
+    pub flow_id: FlowId,
+    pub step_id: FlowStepId,
+}
+
+/// Default completion window for a consumed action, in seconds.
+///
+/// Provisional. Real login durations have not been measured, and this number is
+/// expected to move once they are.
+pub const DEFAULT_EXECUTION_TTL_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Approval {
@@ -292,7 +340,20 @@ pub struct Capability {
     pub max_uses: u32,
     pub used_count: u32,
     pub issued_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    /// Deadline for prepare, commit, and secret release. Expiry *before*
+    /// consumption is proof that no secret was used, and is safe to report as a
+    /// clean failure.
+    pub consume_deadline: DateTime<Utc>,
+    /// Deadline for the action to finish, measured from consumption. Expiry
+    /// *after* consumption proves nothing about the destination: the outcome is
+    /// indeterminate, never a failure.
+    pub execution_deadline: DateTime<Utc>,
+    /// Optional per-step budget inside a multi-step flow.
+    pub step_deadline: Option<DateTime<Utc>>,
+    /// The authentication flow this capability is a step of, when it belongs to
+    /// one. A flow's steps each consume their own capability.
+    pub flow_id: Option<FlowId>,
+    pub step_id: Option<FlowStepId>,
     pub revoked_reason: Option<String>,
 }
 
@@ -310,10 +371,30 @@ pub struct CapabilitySummary {
 }
 
 impl Capability {
+    /// Whether this capability may still be consumed.
+    ///
+    /// Only the consume deadline is checked. The execution deadline governs a
+    /// window that has not started yet, and letting it block consumption would
+    /// be a category error.
     pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
         (self.state == CapabilityState::Issued || self.state == CapabilityState::Active)
-            && now <= self.expires_at
+            && now <= self.consume_deadline
             && self.used_count < self.max_uses
+    }
+
+    /// Whether the post-consumption completion window has elapsed.
+    ///
+    /// Callers must map this to an indeterminate outcome. It is never grounds
+    /// for reporting that the action did not happen: by this point the
+    /// destination may already have accepted the credential.
+    pub fn execution_window_elapsed(&self, now: DateTime<Utc>) -> bool {
+        now > self.execution_deadline
+    }
+
+    /// Whether the current step's budget has elapsed. Same rule as above: after
+    /// consumption this is indeterminate, not failure.
+    pub fn step_window_elapsed(&self, now: DateTime<Utc>) -> bool {
+        self.step_deadline.is_some_and(|deadline| now > deadline)
     }
 }
 

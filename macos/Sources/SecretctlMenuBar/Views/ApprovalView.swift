@@ -25,6 +25,9 @@ struct ApprovalView: View {
     @State private var showStandingSheet = false
     @State private var presenceNotice: String?
     @State private var now = Date()
+    /// The affirmative button is inert until this flips. See
+    /// `ApprovalChrome.settleInterval`.
+    @State private var hasSettled = false
 
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -36,7 +39,7 @@ struct ApprovalView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     if request.isFirstForAgent { firstTimeNotice }
                     verifiedSection
-                    if let reason = request.reason, !reason.isEmpty { whySection(reason) }
+                    if let reason = sanitizedReason { whySection(reason) }
                     securityNote
                     if let failure {
                         failureNotice(failure).transition(Motion.contentSwap)
@@ -55,6 +58,12 @@ struct ApprovalView: View {
         .frame(width: 460)
         .frame(minHeight: 480)
         .onReceive(clock) { now = $0 }
+        .task {
+            // A prompt that appears under a cursor already travelling toward a
+            // click would otherwise accept that click as an authorization.
+            try? await Task.sleep(for: ApprovalChrome.settleInterval)
+            hasSettled = true
+        }
         .sheet(isPresented: $showStandingSheet) {
             StandingAuthorizationSheet(request: request) { granted in
                 showStandingSheet = false
@@ -154,7 +163,15 @@ struct ApprovalView: View {
             .joined(separator: " + ")
     }
 
-    private func whySection(_ reason: String) -> some View {
+    /// The agent's `reason`, sanitized once per request rather than on every
+    /// redraw. Nil when the agent supplied nothing worth a section.
+    private var sanitizedReason: AgentText? {
+        guard let raw = request.reason, !raw.isEmpty else { return nil }
+        let cleaned = AgentText.sanitize(raw, verifiedOrigin: request.origin)
+        return cleaned.displayed.isEmpty ? nil : cleaned
+    }
+
+    private func whySection(_ reason: AgentText) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeading(title: "Why")
             AgentProvidedText(agentName: request.agentName, text: reason)
@@ -209,17 +226,31 @@ struct ApprovalView: View {
     private var actions: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Button("Deny") { Task { await deny() } }
+                // Denying early is always safe, so it keeps its shortcut and
+                // has no settle delay.
+                Button(ApprovalChrome.negativeLabel) { Task { await deny() } }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                if isWorking { ProgressView().controlSize(.small) }
-                // Deliberately not "Always allow": a standing authorization is
-                // a separate, explicitly scoped flow below.
-                Button("Authorize once") { Task { await approve() } }
-                    .keyboardShortcut(.defaultAction)
+                ProgressView()
+                    .controlSize(.small)
+                    .opacity(isWorking ? 1 : 0)
+                    .animation(Motion.enter(), value: isWorking)
+                // Broker-owned wording, and deliberately *not* the default
+                // action: no keyboard shortcut may approve and nothing is
+                // pre-focused, so a stray Return cannot release a credential.
+                // Inert for the settle interval, to defeat a click aimed at
+                // whatever this window appeared on top of.
+                Button(ApprovalChrome.affirmativeLabel) { Task { await approve() } }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!hasSettled)
             }
             .disabled(isWorking)
+
+            if !hasSettled {
+                Text("Authorize becomes available in a moment.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
 
             if request.grantable {
                 Button("Create standing authorization…") { showStandingSheet = true }

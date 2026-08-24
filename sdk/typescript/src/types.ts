@@ -62,6 +62,49 @@ export interface ExecuteRequest {
   clientContext?: Record<string, string>;
 }
 
+export interface AuthenticateOptions {
+  action?: SecretAction;
+  requestId?: string;
+  timeoutMs?: number;
+  clientContext?: Record<string, string>;
+}
+
+export type SafeLocator =
+  | { kind: "css" | "test_id" | "ref" | "text"; value: string }
+  | { kind: "role"; role: string; name: string };
+
+export type WaitCondition =
+  | { kind: "locator_present" | "locator_absent"; locator: SafeLocator }
+  | { kind: "text_present" | "url_prefix" | "url_changed_from"; value: string };
+
+export interface BrowserTab {
+  tab_id: string;
+  url: string;
+  title: string;
+}
+
+export interface PageTextResult {
+  text: string;
+  truncated: boolean;
+}
+
+export interface SafePageElement {
+  reference: string;
+  tag: string;
+  role: string;
+  name: string;
+  input_type?: string;
+  protected: boolean;
+  disabled: boolean;
+  visible?: boolean;
+}
+
+export interface SafePageSnapshot {
+  url: string;
+  elements: SafePageElement[];
+  truncated: boolean;
+}
+
 export interface ApprovalSummary {
   approvalId: string;
   actor: string;
@@ -82,9 +125,10 @@ export type ExecuteResult =
       completedAt?: string;
     }
   | {
-      status: "denied" | "expired" | "cancelled" | "indeterminate" | "revoked" | "failed";
+      status: "denied" | "expired" | "cancelled" | "indeterminate" | "completed_evidence_lost" | "revoked" | "failed";
       requestId: string;
       code: SecretCtlErrorCode;
       safeMessage: string;
+      retryable: boolean;
       evidenceId?: string;
     };

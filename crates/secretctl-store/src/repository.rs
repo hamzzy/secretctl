@@ -557,9 +557,10 @@ impl SqliteStore {
         tx.execute(
             "INSERT INTO capabilities
              (capability_id, request_id, token_hash, state, max_uses, used_count,
-              issued_at, expires_at, revoked_reason, signing_key_id, policy_hash,
+              issued_at, consume_deadline, execution_deadline, step_deadline,
+              flow_id, step_id, revoked_reason, signing_key_id, policy_hash,
               browser_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 capability.capability_id.as_str(),
                 capability.request_id.as_str(),
@@ -568,7 +569,11 @@ impl SqliteStore {
                 capability.max_uses,
                 capability.used_count,
                 capability.issued_at.to_rfc3339(),
-                capability.expires_at.to_rfc3339(),
+                capability.consume_deadline.to_rfc3339(),
+                capability.execution_deadline.to_rfc3339(),
+                capability.step_deadline.map(|value| value.to_rfc3339()),
+                capability.flow_id.as_ref().map(|id| id.to_string()),
+                capability.step_id.as_ref().map(|id| id.to_string()),
                 capability.revoked_reason,
                 signing_key_id,
                 capability.policy_hash,
@@ -772,11 +777,11 @@ impl SqliteStore {
         let conn = self.conn.lock().unwrap();
         let sql = if state.is_some() {
             "SELECT capability_id, request_id, state, max_uses, used_count, issued_at,
-                    expires_at, revoked_reason, signing_key_id
+                    consume_deadline, revoked_reason, signing_key_id
              FROM capabilities WHERE state = ?1 ORDER BY issued_at DESC"
         } else {
             "SELECT capability_id, request_id, state, max_uses, used_count, issued_at,
-                    expires_at, revoked_reason, signing_key_id
+                    consume_deadline, revoked_reason, signing_key_id
              FROM capabilities ORDER BY issued_at DESC"
         };
         let mut statement = conn.prepare(sql)?;

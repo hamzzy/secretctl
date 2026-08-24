@@ -321,9 +321,18 @@ impl BrokerState {
                     now - at <= chrono::Duration::seconds(TERMINAL_STATE_LINGER_SECONDS)
                 })
         });
+        let evidence_lost = executions.values().any(|active| {
+            active.execution.state == ExecutionState::CompletedEvidenceLost
+                && active.execution.completed_at.is_some_and(|at| {
+                    now - at <= chrono::Duration::seconds(TERMINAL_STATE_LINGER_SECONDS)
+                })
+        });
         drop(executions);
         if uncertain {
             return Ok(Some(UiProtectionState::OutcomeUncertain));
+        }
+        if evidence_lost {
+            return Ok(Some(UiProtectionState::CompletedEvidenceLost));
         }
 
         let events = self

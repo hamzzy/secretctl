@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 
-import { assertAgentSafe, parseExecuteResult } from "./client.js";
+import { SecretCtl, assertAgentSafe, parseExecuteResult } from "./client.js";
 
 test("hostile secret-bearing broker fields fail closed", () => {
   assert.throws(
@@ -52,4 +52,51 @@ test("shared cross-language result fixture stays schema-compatible", () => {
   assert.deepEqual(fixture.map((value) => parseExecuteResult(value, request).status), [
     "completed", "failed",
   ]);
+});
+
+test("ergonomic authentication and safe browser methods stay broker-routed", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const client = Object.create(SecretCtl.prototype) as SecretCtl;
+  (client as unknown as {
+    rpc: (method: string, params: Record<string, unknown>) => Promise<unknown>;
+  }).rpc = async (method: string, params: Record<string, unknown>) => {
+    calls.push({ method, params });
+    if (method === "action.authenticate") {
+      return {
+        request_id: "req_auth", state: "capability_issued",
+        action: "authenticate.password", verified_origin: "https://example.test:443",
+        browser_session_id: "bs_1",
+      };
+    }
+    if (method === "page.read_text") return { text: "Sign in", truncated: false };
+    if (method === "page.snapshot_safe") {
+      return { url: "https://example.test/", elements: [], truncated: false };
+    }
+    if (method === "page.wait_for") return { satisfied: true };
+    return {};
+  };
+
+  const result = await client.authenticate("github-work", "Sign me in");
+  assert.equal(result.status, "capability_issued");
+  assert.deepEqual(await client.readText("bs_1", "tab_1"), {
+    text: "Sign in", truncated: false,
+  });
+  assert.equal((await client.snapshotSafe("bs_1", "tab_1")).url, "https://example.test/");
+  assert.equal(await client.waitFor("bs_1", "tab_1", {
+    kind: "text_present", value: "Sign in",
+  }), true);
+  await client.select("bs_1", "tab_1", { kind: "role", role: "combobox", name: "Region" }, "EU");
+  await client.back("bs_1", "tab_1");
+  await client.forward("bs_1", "tab_1");
+
+  assert.deepEqual(calls.map((call) => call.method), [
+    "action.authenticate", "page.read_text", "page.snapshot_safe",
+    "page.wait_for", "page.select", "browser.back", "browser.forward",
+  ]);
+  assert.deepEqual(calls[0].params, {
+    identity: "github-work",
+    reason: "Sign me in",
+    wait: true,
+    timeout_ms: 60000,
+  });
 });

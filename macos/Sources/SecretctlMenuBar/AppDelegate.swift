@@ -16,7 +16,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
-    private var approvalWindows: [String: NSWindow] = [:]
+    /// At most one approval prompt is visible at a time (§14.3.3). A second
+    /// request waits its turn rather than stacking, overlaying, or reordering —
+    /// a pile of prompts is how someone ends up approving the wrong one.
+    private var approvalWindow: (approvalID: String, window: NSWindow)?
+    private var approvalQueue: [String] = []
+    private var promptLimiter = PromptRateLimiter()
     private var manageWindow: NSWindow?
     private var onboardingWindow: NSWindow?
 
@@ -31,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         notifications.prepare()
 
         store.onNewRequest = { [weak self] request in
-            self?.notifications.announce(request)
+            self?.announce(request)
         }
         store.onStateChange = { [weak self] _, new in
             self?.applyGlyph(new)
@@ -131,13 +136,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    /// Raise a notification for a new request, unless this pair has been
+    /// prompting too often.
+    ///
+    /// A throttled request is not dropped — the daemon still holds it and the
+    /// popover still lists it. What is suppressed is the interruption.
+    /// Suppressing the request itself would be a security decision, and this
+    /// process does not make those.
+    private func announce(_ request: AuthorizationRequest) {
+        let verdict = promptLimiter.admit(agent: request.agentID, credential: request.credentialName)
+        guard verdict == .allow else {
+            Diagnostics.promptRateLimited(reason: String(describing: verdict))
+            return
+        }
+        notifications.announce(request)
+    }
+
     private func presentApproval(_ request: AuthorizationRequest) {
         popover?.performClose(nil)
         notifications.withdraw(approvalID: request.approvalID)
 
-        if let existing = approvalWindows[request.approvalID] {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+        if let open = approvalWindow {
+            if open.approvalID == request.approvalID {
+                open.window.orderFrontRegardless()
+            } else if !approvalQueue.contains(request.approvalID) {
+                // No stacking: it waits until the open one is answered.
+                approvalQueue.append(request.approvalID)
+            }
             return
         }
 
@@ -158,19 +183,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         window.collectionBehavior.insert(.moveToActiveSpace)
         window.center()
         window.contentView = NSHostingView(
-            rootView: ApprovalView(request: request) { [weak self] in
+            rootView: ApprovalWindowView(request: request) { [weak self] in
                 self?.closeApproval(request.approvalID)
             }
             .environmentObject(store)
             .environmentObject(settings)
         )
-        approvalWindows[request.approvalID] = window
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        approvalWindow = (request.approvalID, window)
+        // Ordered front without being made key, and without activating the app
+        // (§14.3.3): the prompt must not steal keyboard focus, so a keystroke
+        // aimed at whatever the person was actually doing cannot land here.
+        window.orderFrontRegardless()
     }
 
     private func closeApproval(_ approvalID: String) {
-        approvalWindows.removeValue(forKey: approvalID)?.close()
+        guard approvalWindow?.approvalID == approvalID else { return }
+        approvalWindow?.window.close()
+        approvalWindow = nil
+        presentNextQueuedApproval()
+    }
+
+    /// Show the next queued request, if it is still pending.
+    private func presentNextQueuedApproval() {
+        while let next = approvalQueue.first {
+            approvalQueue.removeFirst()
+            if let request = store.pending.first(where: { $0.approvalID == next }) {
+                presentApproval(request)
+                return
+            }
+        }
     }
 
     // MARK: - Management and onboarding

@@ -23,6 +23,19 @@ const PROHIBITED_CDP_METHODS: &[&str] = &[
     "Browser.getBrowserCommandLine",
     "Browser.setDownloadBehavior",
     "Page.setDownloadBehavior",
+    // Whole-page serializations. These are denied outright rather than only
+    // during a sensitive window: `page.snapshot_safe` is the one sanctioned way
+    // to observe structure, and it elides protected nodes before serializing.
+    // Leaving a full dump reachable at any moment would be a standing bypass of
+    // that projection, and a page can echo a credential into the DOM long after
+    // the injection window has closed.
+    "DOMSnapshot.captureSnapshot",
+    "DOMSnapshot.getSnapshot",
+    "Accessibility.getFullAXTree",
+    "Accessibility.getRootAXNode",
+    "DOM.getFlattenedDocument",
+    "Page.getResourceContent",
+    "Page.getResourceTree",
 ];
 
 const ALLOWED_CDP_METHODS: &[&str] = &[
@@ -50,13 +63,13 @@ const ALLOWED_CDP_METHODS: &[&str] = &[
     "Target.attachToTarget",
 ];
 
+/// Methods the trusted driver may legitimately use, but never while a secret is
+/// on screen. Anything that must be unavailable at all times belongs in
+/// `PROHIBITED_CDP_METHODS` instead.
 const SENSITIVE_WINDOW_BLOCKED_METHODS: &[&str] = &[
     "Page.captureScreenshot",
     "Page.startScreencast",
     "Page.printToPDF",
-    "DOMSnapshot.captureSnapshot",
-    "Accessibility.getFullAXTree",
-    "Accessibility.getRootAXNode",
     "Tracing.start",
 ];
 
@@ -103,18 +116,16 @@ impl CdpFilter {
         method: &str,
         tab_id: Option<u32>,
     ) -> Result<(), GatewayError> {
-        // 1. Check globally prohibited methods
-        for &prohibited in PROHIBITED_CDP_METHODS {
-            if method == prohibited
-                || method.starts_with("Storage.")
-                || method.starts_with("DOMStorage.")
-                || method.starts_with("IndexedDB.")
-            {
-                return Err(GatewayError::CommandDenied(format!(
-                    "CDP method '{}' is prohibited by secretctl security policy",
-                    method
-                )));
-            }
+        // 1. Globally prohibited methods, plus whole domains that exist only to
+        //    read stored credential material.
+        let prohibited_domain = ["Storage.", "DOMStorage.", "IndexedDB.", "DOMSnapshot."]
+            .iter()
+            .any(|domain| method.starts_with(domain));
+        if prohibited_domain || PROHIBITED_CDP_METHODS.contains(&method) {
+            return Err(GatewayError::CommandDenied(format!(
+                "CDP method '{}' is prohibited by secretctl security policy",
+                method
+            )));
         }
 
         if !ALLOWED_CDP_METHODS.contains(&method)

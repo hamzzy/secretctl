@@ -39,15 +39,15 @@ public actor AdminClient {
         public var errorDescription: String? {
             switch self {
             case .notInitialised:
-                return "secretctl is not set up on this Mac yet. Run `secretctl init` to create an installation."
+                return String(localized: "secretctl is not set up on this Mac yet. Run `secretctl init` to create an installation.")
             case .keyPinMismatch:
-                return "The daemon's identity does not match the key this Mac has pinned. secretctl will not connect."
+                return String(localized: "The daemon's identity does not match the key this Mac has pinned. secretctl will not connect.")
             case .handshakeRejected(let detail):
-                return "secretctld refused the connection: \(detail)"
+                return String(localized: "secretctld refused the connection: \(detail)")
             case .daemonUnavailable(let detail):
-                return "secretctld is not reachable: \(detail)"
+                return String(localized: "secretctld is not reachable: \(detail)")
             case .malformedResponse:
-                return "secretctld sent a response secretctl could not read."
+                return String(localized: "secretctld sent a response secretctl could not read.")
             }
         }
     }

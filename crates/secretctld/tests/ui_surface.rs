@@ -89,7 +89,8 @@ async fn setup(require_presence: bool, risk: RiskLevel) -> Harness {
             browser_assurance: Some("managed".to_string()),
             require_user_presence: require_presence,
             max_uses: 1,
-            max_ttl_seconds: 30,
+            max_consume_ttl_seconds: 30,
+            max_execution_ttl_seconds: 120,
         },
     };
     let evaluator = PolicyEvaluator::new(PolicyDocument {

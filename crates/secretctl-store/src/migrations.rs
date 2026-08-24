@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 5;
+pub const CURRENT_SCHEMA_VERSION: i32 = 6;
 
 pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
@@ -292,6 +292,39 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at, checksum)
              VALUES (5, datetime('now'), 'v5_totp_step_deduplication')",
+            [],
+        )?;
+    }
+
+    if version < 6 {
+        // Split the single capability TTL into independent deadlines.
+        //
+        // `expires_at` conflated two different quantities: how long the runtime
+        // had to take delivery of a secret, and how long the resulting login was
+        // allowed to take. Collapsing them meant a two-step login either forced
+        // an unsafely long secret window or timed out. The old column is
+        // preserved as the consume deadline, which is what it actually was.
+        tx.execute(
+            "ALTER TABLE capabilities RENAME COLUMN expires_at TO consume_deadline",
+            [],
+        )?;
+        tx.execute(
+            "ALTER TABLE capabilities ADD COLUMN execution_deadline TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        tx.execute("ALTER TABLE capabilities ADD COLUMN step_deadline TEXT", [])?;
+        tx.execute("ALTER TABLE capabilities ADD COLUMN flow_id TEXT", [])?;
+        tx.execute("ALTER TABLE capabilities ADD COLUMN step_id TEXT", [])?;
+        // Existing rows predate the split; their completion window is the
+        // consume deadline, which is the only bound that ever applied to them.
+        tx.execute(
+            "UPDATE capabilities SET execution_deadline = consume_deadline
+             WHERE execution_deadline = ''",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at, checksum)
+             VALUES (6, datetime('now'), 'v6_split_capability_deadlines')",
             [],
         )?;
     }

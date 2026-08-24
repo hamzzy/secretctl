@@ -17,6 +17,10 @@ enum StatusGlyph {
         case .blocked: return "xmark.shield.fill"
         case .protectionInterrupted: return "exclamationmark.shield.fill"
         case .outcomeUncertain: return "questionmark.diamond.fill"
+        // Completed, but the audit trail for it did not survive. A triangle
+        // rather than another shield: the credential operation itself was fine,
+        // so a shield glyph would understate what is actually wrong.
+        case .completedEvidenceLost: return "exclamationmark.triangle.fill"
         case .disconnected: return "shield.slash"
         }
     }

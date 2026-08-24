@@ -46,16 +46,26 @@ fn test_sensitive_window_isolation() {
     let filter = CdpFilter::new();
     let tab_id = 99;
 
-    // Before sensitive window
+    // Before sensitive window: capture is available to the trusted driver,
+    // because a redaction-verified screenshot is a legitimate future need.
     assert!(
         filter
             .validate_cdp_command("Page.captureScreenshot", Some(tab_id))
             .is_ok()
     );
+    // Whole-page dumps are not: they are denied at all times, not merely while
+    // a credential is being injected. `page.snapshot_safe` is the only
+    // sanctioned way to observe structure, and a page may echo a secret into
+    // the DOM long after the injection window closes.
     assert!(
         filter
             .validate_cdp_command("Accessibility.getFullAXTree", Some(tab_id))
-            .is_ok()
+            .is_err()
+    );
+    assert!(
+        filter
+            .validate_cdp_command("DOMSnapshot.captureSnapshot", Some(tab_id))
+            .is_err()
     );
 
     // Enter sensitive window during credential injection
@@ -81,12 +91,17 @@ fn test_sensitive_window_isolation() {
             .is_err()
     );
 
-    // Exit sensitive window
+    // Exit sensitive window: capture returns, whole-page dumps do not.
     filter.exit_sensitive_window(tab_id);
     assert!(
         filter
             .validate_cdp_command("Page.captureScreenshot", Some(tab_id))
             .is_ok()
+    );
+    assert!(
+        filter
+            .validate_cdp_command("Accessibility.getFullAXTree", Some(tab_id))
+            .is_err()
     );
 }
 

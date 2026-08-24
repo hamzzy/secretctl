@@ -148,6 +148,9 @@ pub enum UiProtectionState {
     ProtectionInterrupted,
     /// The outcome of an operation could not be confirmed either way.
     OutcomeUncertain,
+    /// Executor reported success, but durable audit evidence was not committed.
+    /// The operation must never be retried automatically.
+    CompletedEvidenceLost,
     /// The daemon is unreachable. All sensitive operations are disabled.
     Disconnected,
 }

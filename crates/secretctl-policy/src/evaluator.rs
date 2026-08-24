@@ -95,7 +95,8 @@ impl PolicyEvaluator {
                     policy_hash: self.policy_hash.clone(),
                     require_user_presence: true,
                     max_uses: 0,
-                    ttl_seconds: 0,
+                    consume_ttl_seconds: 0,
+                    execution_ttl_seconds: 0,
                 });
             }
 
@@ -118,7 +119,8 @@ impl PolicyEvaluator {
                 policy_hash: self.policy_hash.clone(),
                 require_user_presence: rule.conditions.require_user_presence,
                 max_uses: rule.conditions.max_uses,
-                ttl_seconds: rule.conditions.max_ttl_seconds,
+                consume_ttl_seconds: rule.conditions.max_consume_ttl_seconds,
+                execution_ttl_seconds: rule.conditions.max_execution_ttl_seconds,
             })
         } else {
             Err(PolicyError::DefaultDeny)
@@ -150,7 +152,8 @@ mod tests {
                 browser_assurance: Some("managed".to_string()),
                 require_user_presence: false,
                 max_uses: 1,
-                max_ttl_seconds: 30,
+                max_consume_ttl_seconds: 30,
+                max_execution_ttl_seconds: 120,
             },
         };
 
@@ -175,7 +178,10 @@ mod tests {
 
         assert_eq!(decision.effect, PolicyEffect::Allow);
         assert_eq!(decision.max_uses, 1);
-        assert_eq!(decision.ttl_seconds, 30);
+        assert_eq!(decision.consume_ttl_seconds, 30);
+        // The completion window is a separate, longer quantity.
+        assert_eq!(decision.execution_ttl_seconds, 120);
+        assert!(decision.execution_ttl_seconds > decision.consume_ttl_seconds);
 
         // Different destination -> default deny
         let other_origin = CanonicalOrigin::parse("https://evil.com").unwrap();

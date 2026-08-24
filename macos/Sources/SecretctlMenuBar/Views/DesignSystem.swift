@@ -54,44 +54,89 @@ struct VerifiedField: View {
 
 /// Text the agent wrote.
 ///
-/// Rendered as an attributed quotation with an explicit "provided by the agent"
-/// caption. The agent controls this string; the framing makes clear that
-/// secretctl does not vouch for it.
+/// This is the one part of the prompt an attacker controls, so it is the one
+/// part built defensively. It renders **collapsed by default** under a fixed
+/// untrusted label; expanding it is a deliberate act, which means the default
+/// state of the window cannot be filled with someone else's argument. The text
+/// is sanitized before it gets here, drawn with `Text(verbatim:)` so no
+/// Markdown or link syntax is ever interpreted, and given no emphasis that
+/// could make it read as system chrome.
 struct AgentProvidedText: View {
     let agentName: String
-    let text: String
+    let text: AgentText
 
-    /// Clamped so a long reason cannot push the buttons off-screen or bury the
-    /// verified facts above it.
-    private var clamped: String {
-        text.count > 400 ? String(text.prefix(400)) + "…" : text
-    }
+    @State private var isExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                Image(systemName: "quote.opening")
-                    .font(.system(size: 9))
-                Text("Provided by \(agentName), not verified by secretctl")
-                    .font(.system(size: 10))
-            }
-            .foregroundStyle(.secondary)
-
-            Text(clamped)
-                .font(.system(size: 12))
-                .italic()
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 10)
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.35))
-                        .frame(width: 2)
+            // A hand-rolled disclosure rather than `DisclosureGroup`. The stock
+            // one draws a focus highlight around its entire contents on macOS,
+            // which put a filled blue panel behind the untrusted text — the one
+            // place in the app that must never look like emphasised system
+            // chrome. A plain button keeps the focus ring on the summary row
+            // where it belongs, and keyboard access with it.
+            Button {
+                withAnimation(Motion.enter(0.16)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Image(systemName: "exclamationmark.bubble")
+                        .font(.system(size: 10))
+                    Text(ApprovalChrome.untrustedSectionLabel)
+                        .font(.system(size: 11, weight: .medium))
+                    Text("· from \(agentName)")
+                        .font(.system(size: 11))
+                    Spacer(minLength: 0)
                 }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableStyle(scale: 0.99))
+            .accessibilityLabel("\(ApprovalChrome.untrustedSectionLabel), from \(agentName)")
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint("Text written by the agent requesting access. secretctl does not vouch for it.")
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    if text.impersonatedBrokerChrome {
+                        Label(
+                            "Part of this text was imitating secretctl's own wording and has been removed.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    // `verbatim` matters: the plain Text(_:) initializer would
+                    // interpret Markdown, turning agent text into links and
+                    // bold system-looking type.
+                    Text(verbatim: text.displayed)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if text.wasTruncated {
+                        Text("Truncated to \(AgentText.displayLimit) characters.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.top, 6)
+                .padding(.leading, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(Color.secondary.opacity(0.3)).frame(width: 2)
+                }
+                .transition(Motion.contentSwap)
+            }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Reason provided by \(agentName), not verified by secretctl: \(clamped)")
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 6))
     }
 }
 

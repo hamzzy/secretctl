@@ -83,9 +83,14 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
             content.body = "An operation was blocked. The credential was not released."
         case .outcomeUncertain:
             content.body = "The result of a credential operation could not be verified."
+        case .completedEvidenceLost:
+            content.body = "A credential operation completed, but secretctl could not record proof of it. Do not retry it."
         case .disconnected:
             content.body = "secretctl lost contact with its daemon. Sensitive operations are disabled."
-        default:
+        // Listed rather than defaulted: a `default` here would silently swallow
+        // any alarming state added later, and a security state that stops
+        // notifying is exactly the failure nobody notices.
+        case .protected, .approvalRequired, .sensitiveOperation, .completed:
             return
         }
         content.interruptionLevel = .timeSensitive

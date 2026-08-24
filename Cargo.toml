@@ -43,7 +43,6 @@ secretctl-browser-gateway = { path = "crates/secretctl-browser-gateway" }
 
 # Platform & Keychain
 security-framework = "3.2"
-keyring = { version = "3.6", default-features = false }
 
 # Serialization & Data Formats
 serde = { version = "1.0", features = ["derive"] }

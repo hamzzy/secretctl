@@ -43,20 +43,20 @@ public struct ErrorPresentation: Sendable, Equatable {
         switch outcome.resultCode?.uppercased() {
         case "INVALIDATED":
             return ErrorPresentation(
-                headline: "The browser page changed before the credential could be released.",
-                detail: "secretctl stopped rather than acting on a page you did not approve. The agent will need to ask again.",
+                headline: String(localized: "The browser page changed before the credential could be released."),
+                detail: String(localized: "secretctl stopped rather than acting on a page you did not approve. The agent will need to ask again."),
                 symbol: "APPROVAL_INVALIDATED"
             )
         case "EXPIRED":
             return ErrorPresentation(
-                headline: "This request expired before it was answered.",
-                detail: "The credential was not released. The agent will need to ask again.",
+                headline: String(localized: "This request expired before it was answered."),
+                detail: String(localized: "The credential was not released. The agent will need to ask again."),
                 symbol: "APPROVAL_EXPIRED"
             )
         default:
             return ErrorPresentation(
-                headline: "secretctl did not accept the authorization.",
-                detail: "The credential was not released. This happens when the request could no longer be verified — most often because user presence was not confirmed, or the page moved on.",
+                headline: String(localized: "secretctl did not accept the authorization."),
+                detail: String(localized: "The credential was not released. This happens when the request could no longer be verified — most often because user presence was not confirmed, or the page moved on."),
                 symbol: "APPROVAL_DENIED"
             )
         }
@@ -80,12 +80,12 @@ public struct ErrorPresentation: Sendable, Equatable {
         }
         if error is UnixSocketConnection.Failure {
             return ErrorPresentation(
-                headline: "secretctl lost its connection to the daemon.",
-                detail: "No credential operation can run until it reconnects.",
+                headline: String(localized: "secretctl lost its connection to the daemon."),
+                detail: String(localized: "No credential operation can run until it reconnects."),
                 symbol: "TRANSPORT_FAILED"
             )
         }
-        return ErrorPresentation(headline: "Something went wrong.", detail: error.localizedDescription)
+        return ErrorPresentation(headline: String(localized: "Something went wrong."), detail: error.localizedDescription)
     }
 
     public static func describe(_ error: BrokerError) -> ErrorPresentation {
@@ -93,91 +93,91 @@ public struct ErrorPresentation: Sendable, Equatable {
         switch error.code {
         case -32001:
             return ErrorPresentation(
-                headline: "Policy does not allow this action.",
-                detail: "The credential was not released.",
+                headline: String(localized: "Policy does not allow this action."),
+                detail: String(localized: "The credential was not released."),
                 symbol: symbol, code: error.code
             )
         case -32002:
             return ErrorPresentation(
-                headline: "This request was already denied.",
-                detail: "Nothing further happened. The agent has been told it was refused.",
+                headline: String(localized: "This request was already denied."),
+                detail: String(localized: "Nothing further happened. The agent has been told it was refused."),
                 symbol: symbol, code: error.code
             )
         case -32003:
             return ErrorPresentation(
-                headline: "The request expired before it was answered.",
-                detail: "The agent will need to ask again.",
+                headline: String(localized: "The request expired before it was answered."),
+                detail: String(localized: "The agent will need to ask again."),
                 symbol: symbol, code: error.code
             )
         case -32004:
             return ErrorPresentation(
-                headline: "The authorization expired before it could be used.",
-                detail: "The credential was not released.",
+                headline: String(localized: "The authorization expired before it could be used."),
+                detail: String(localized: "The credential was not released."),
                 symbol: symbol, code: error.code
             )
         case -32005:
             return ErrorPresentation(
-                headline: "This authorization was already used.",
-                detail: "Each authorization can be used once. The agent will need to ask again.",
+                headline: String(localized: "This authorization was already used."),
+                detail: String(localized: "Each authorization can be used once. The agent will need to ask again."),
                 symbol: symbol, code: error.code
             )
         case -32006:
             return ErrorPresentation(
-                headline: "The browser page changed before the credential could be released.",
-                detail: "secretctl stopped rather than typing into a page you did not approve.",
+                headline: String(localized: "The browser page changed before the credential could be released."),
+                detail: String(localized: "secretctl stopped rather than typing into a page you did not approve."),
                 symbol: symbol, code: error.code
             )
         case -32007:
             return ErrorPresentation(
-                headline: "The destination does not match what was authorized.",
-                detail: "The credential was not released.",
+                headline: String(localized: "The destination does not match what was authorized."),
+                detail: String(localized: "The credential was not released."),
                 symbol: symbol, code: error.code
             )
         case -32008:
             return ErrorPresentation(
-                headline: "The page tried to use the credential somewhere it was not allowed.",
-                detail: "The credential was not released.",
+                headline: String(localized: "The page tried to use the credential somewhere it was not allowed."),
+                detail: String(localized: "The credential was not released."),
                 symbol: symbol, code: error.code
             )
         case -32009:
             return ErrorPresentation(
-                headline: "The browser session ended.",
-                detail: "Reconnect the managed browser before running another operation.",
+                headline: String(localized: "The browser session ended."),
+                detail: String(localized: "Reconnect the managed browser before running another operation."),
                 symbol: symbol, code: error.code
             )
         case -32010:
             return ErrorPresentation(
-                headline: "The browser could not complete the operation.",
-                detail: "secretctl could not confirm what happened, so no further credential operation will run on this session.",
+                headline: String(localized: "The browser could not complete the operation."),
+                detail: String(localized: "secretctl could not confirm what happened, so no further credential operation will run on this session."),
                 symbol: symbol, code: error.code
             )
         case -32011:
             return ErrorPresentation(
-                headline: "secretctl does not know how to sign in to this site yet.",
-                detail: "No site recipe matched this destination.",
+                headline: String(localized: "secretctl does not know how to sign in to this site yet."),
+                detail: String(localized: "No site recipe matched this destination."),
                 symbol: symbol, code: error.code
             )
         case -32012:
             return ErrorPresentation(
-                headline: "secretctl could not confirm that you were present.",
-                detail: "This action requires Touch ID or your login password, and neither could be used. The credential was not released.",
+                headline: String(localized: "secretctl could not confirm that you were present."),
+                detail: String(localized: "This action requires Touch ID or your login password, and neither could be used. The credential was not released."),
                 symbol: symbol, code: error.code
             )
         case -32099:
             return ErrorPresentation(
-                headline: "secretctl stopped a request that failed a security check.",
-                detail: "The credential was not released.",
+                headline: String(localized: "secretctl stopped a request that failed a security check."),
+                detail: String(localized: "The credential was not released."),
                 symbol: symbol, code: error.code
             )
         case -32602:
             return ErrorPresentation(
-                headline: "That request is no longer valid.",
-                detail: "It may have already been answered or expired.",
+                headline: String(localized: "That request is no longer valid."),
+                detail: String(localized: "It may have already been answered or expired."),
                 symbol: symbol, code: error.code
             )
         default:
             return ErrorPresentation(
-                headline: "secretctl could not complete that.",
+                headline: String(localized: "secretctl could not complete that."),
                 detail: error.message,
                 symbol: symbol, code: error.code
             )

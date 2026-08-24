@@ -67,3 +67,11 @@ public enum Diagnostics {
             """)
     }
 }
+
+extension Diagnostics {
+    /// A prompt was suppressed to avoid fatigue. The request itself is
+    /// untouched — only the interruption was withheld.
+    public static func promptRateLimited(reason: String) {
+        decisions.notice("prompt suppressed: \(reason, privacy: .public)")
+    }
+}

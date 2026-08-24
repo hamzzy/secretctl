@@ -69,6 +69,8 @@ define_id!(ExecutionId, "exec");
 define_id!(GrantId, "grant");
 define_id!(EventId, "evt");
 define_id!(RuleId, "rule");
+define_id!(FlowId, "flw");
+define_id!(FlowStepId, "stp");
 
 #[cfg(test)]
 mod tests {

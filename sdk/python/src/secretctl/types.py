@@ -1,6 +1,6 @@
 """Strict, agent-safe public models for the secretctl Python SDK."""
 
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -35,7 +35,8 @@ class ExecuteRequest(StrictModel):
 
 class ExecuteResult(StrictModel):
     status: Literal[
-        "completed", "capability_issued", "denied", "expired", "cancelled", "indeterminate", "revoked", "failed"
+        "completed", "capability_issued", "denied", "expired", "cancelled", "indeterminate",
+        "completed_evidence_lost", "revoked", "failed"
     ]
     request_id: str
     action: Optional[str] = None
@@ -46,6 +47,7 @@ class ExecuteResult(StrictModel):
     grant_id: Optional[str] = None
     code: Optional[str] = None
     safe_message: Optional[str] = None
+    retryable: Optional[bool] = None
     completed_at: Optional[str] = None
 
 
@@ -60,3 +62,31 @@ class SessionInfo(StrictModel):
     principal_id: str
     role: Literal["agent"]
     rekey_after_seconds: int
+
+
+class BrowserTab(StrictModel):
+    tab_id: str
+    url: str
+    title: str
+
+
+class PageTextResult(StrictModel):
+    text: str
+    truncated: bool
+
+
+class SafePageElement(StrictModel):
+    reference: str
+    tag: str
+    role: str
+    name: str
+    input_type: Optional[str] = None
+    protected: bool
+    disabled: bool
+    visible: Optional[bool] = None
+
+
+class SafePageSnapshot(StrictModel):
+    url: str
+    elements: List[SafePageElement]
+    truncated: bool

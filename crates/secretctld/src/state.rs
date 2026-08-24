@@ -1,3 +1,4 @@
+use crate::dom_view::{PageProjection, ResolveError, ViewLimits};
 use chrono::Utc;
 use secretctl_audit::{AuditContext, create_audit_event};
 use secretctl_browser_gateway::{BrowserLauncher, CdpFilter, CdpPipe, LaunchedBrowser};
@@ -13,15 +14,17 @@ use secretctl_domain::{
 };
 use secretctl_policy::PolicyEvaluator;
 use secretctl_protocol::{
-    ActionCancelParams, ActionCancelResult, ActionRequestParams, ActionResponseResult,
-    ActionStatusParams, ActionStatusResult, BrowserCloseParams, BrowserLaunchParams,
-    BrowserLaunchResult, BrowserNavigateParams, BrowserOpenTabParams, BrowserRegisterParams,
-    BrowserRegisterResult, BrowserSessionParams, BrowserTabParams, ExecutionFieldPlan,
-    ExecutionNextParams, ExecutionNextResult, ExecutionOfferResult, ExecutionSuccessPlan,
-    ExecutorConsumeParams, ExecutorConsumeResult, ExecutorHeartbeatParams, ExecutorHeartbeatResult,
-    ExecutorPrepareParams, ExecutorPrepareResult, ExecutorResultParams, ExecutorResultResult,
-    MANAGED_EXTENSION_ID, OAuthCallbackParams, OAuthCallbackResult, OAuthExecutionPlan,
-    PageLocatorParams, PageTypePublicParams, ResolvedFieldInjection, RpcError, RpcErrorCode,
+    ActionAuthenticateParams, ActionAuthenticateResult, ActionCancelParams, ActionCancelResult,
+    ActionRequestParams, ActionResponseResult, ActionStatusParams, ActionStatusResult,
+    BrowserCloseParams, BrowserLaunchParams, BrowserLaunchResult, BrowserNavigateParams,
+    BrowserOpenTabParams, BrowserRegisterParams, BrowserRegisterResult, BrowserSessionParams,
+    BrowserTabParams, ExecutionFieldPlan, ExecutionNextParams, ExecutionNextResult,
+    ExecutionOfferResult, ExecutionSuccessPlan, ExecutorConsumeParams, ExecutorConsumeResult,
+    ExecutorHeartbeatParams, ExecutorHeartbeatResult, ExecutorPrepareParams, ExecutorPrepareResult,
+    ExecutorResultParams, ExecutorResultResult, MANAGED_EXTENSION_ID, OAuthCallbackParams,
+    OAuthCallbackResult, OAuthExecutionPlan, PageLocatorParams, PageReadTextParams,
+    PageSelectParams, PageSnapshotParams, PageTypePublicParams, PageWaitForParams,
+    ResolvedFieldInjection, RpcError, RpcErrorCode, SafeLocator, WaitCondition,
 };
 use secretctl_providers::SecretProvider;
 use secretctl_store::SqliteStore;
@@ -712,55 +715,142 @@ impl BrokerState {
         nodes[0].as_u64().ok_or_else(Self::cdp_failure)
     }
 
-    fn node_is_sensitive(node: &serde_json::Value) -> bool {
-        let attributes = node
-            .pointer("/node/attributes")
-            .and_then(serde_json::Value::as_array);
-        let mut sensitive = false;
-        if let Some(attributes) = attributes {
-            for pair in attributes.chunks(2) {
-                let name = pair
-                    .first()
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                let value = pair
-                    .get(1)
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if (name == "type" && value == "password")
-                    || (name == "autocomplete"
-                        && matches!(
-                            value.as_str(),
-                            "current-password" | "new-password" | "one-time-code"
-                        ))
-                    || (matches!(name.as_str(), "name" | "id")
-                        && ["password", "passwd", "otp", "totp", "secret", "token"]
-                            .iter()
-                            .any(|term| value.contains(term)))
-                {
-                    sensitive = true;
-                }
-            }
+    /// Ceiling on box-model round trips per snapshot. Layout truth is worth one
+    /// request per element, but not an unbounded number of them.
+    const MAX_VISIBILITY_PROBES: usize = 40;
+    const DEFAULT_WAIT_TIMEOUT_MS: u64 = 10_000;
+    const MAX_WAIT_TIMEOUT_MS: u64 = 30_000;
+    const WAIT_POLL_INTERVAL_MS: u64 = 200;
+
+    /// Refuse to observe a session while a secret is in flight anywhere in it.
+    ///
+    /// The check is per session rather than per tab on purpose. Sensitive
+    /// windows are tracked against the extension's tab identifiers, which are a
+    /// different namespace from the gateway's target IDs; rather than map
+    /// between them and risk observing the very tab holding a credential, the
+    /// broker blocks the whole session for the short duration of an injection.
+    fn guard_observation(&self, session_id: &BrowserSessionId) -> Result<(), RpcError> {
+        let blocked = self
+            .sensitive_filter_for_session(session_id)
+            .is_some_and(|filter| filter.has_sensitive_window());
+        if blocked {
+            return Err(RpcError::new(
+                RpcErrorCode::OBSERVATION_BLOCKED,
+                "Observation is blocked while an authentication action is in progress",
+            ));
         }
-        sensitive
+        Ok(())
     }
 
-    pub fn handle_page_click(
-        &self,
-        params: PageLocatorParams,
-    ) -> Result<serde_json::Value, RpcError> {
-        let selector = params.locator.css().map_err(|_| Self::cdp_failure())?;
-        let (pipe, filter) = self.browser_transport(&params.session_id)?;
-        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
-        let node_id = Self::locate_node(&pipe, &filter, &cdp_session, &selector)?;
+    fn locator_failure(error: ResolveError) -> RpcError {
+        match error {
+            ResolveError::NotFound => RpcError::new(
+                RpcErrorCode::LOCATOR_NOT_FOUND,
+                "Locator matched no element",
+            ),
+            ResolveError::Ambiguous => RpcError::new(
+                RpcErrorCode::LOCATOR_AMBIGUOUS,
+                "Locator must resolve exactly once",
+            ),
+            ResolveError::Stale => RpcError::new(
+                RpcErrorCode::STALE_REFERENCE,
+                "Reference no longer names the same element; take a new snapshot",
+            ),
+            ResolveError::Protected => {
+                RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "Protected field rejected")
+            }
+        }
+    }
+
+    /// Project the whole document of an attached tab.
+    fn project_document(
+        pipe: &CdpPipe,
+        filter: &CdpFilter,
+        cdp_session: &str,
+        limits: &ViewLimits,
+    ) -> Result<PageProjection, RpcError> {
+        let document = pipe
+            .request_with_session(
+                filter,
+                "DOM.getDocument",
+                None,
+                Some(cdp_session),
+                // `pierce` stays false: frame documents belong to their own
+                // origin and are never folded into the top page's view.
+                serde_json::json!({"depth": -1, "pierce": false}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        let root = document.get("root").ok_or_else(Self::cdp_failure)?;
+        Ok(PageProjection::from_node(root, limits))
+    }
+
+    /// Project one element's subtree.
+    fn project_subtree(
+        pipe: &CdpPipe,
+        filter: &CdpFilter,
+        cdp_session: &str,
+        node_id: u64,
+        limits: &ViewLimits,
+    ) -> Result<PageProjection, RpcError> {
+        let described = pipe
+            .request_with_session(
+                filter,
+                "DOM.describeNode",
+                None,
+                Some(cdp_session),
+                serde_json::json!({"nodeId": node_id, "depth": -1, "pierce": false}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        let node = described.get("node").ok_or_else(Self::cdp_failure)?;
+        Ok(PageProjection::from_node(node, limits))
+    }
+
+    /// Resolve any locator form to a live node id.
+    ///
+    /// Selector locators go through `DOM.querySelectorAll` as before. Reference,
+    /// role, and text locators are resolved against a fresh projection, so what
+    /// the agent names is matched against the same redacted view it was shown —
+    /// it can never address an element the projection would have hidden.
+    fn resolve_locator(
+        pipe: &CdpPipe,
+        filter: &CdpFilter,
+        cdp_session: &str,
+        locator: &SafeLocator,
+    ) -> Result<u64, RpcError> {
+        if locator.is_css_based() {
+            let selector = locator.css().map_err(|_| Self::cdp_failure())?;
+            return Self::locate_node(pipe, filter, cdp_session, &selector);
+        }
+        let limits = ViewLimits::clamped(Some(250), None);
+        let projection = Self::project_document(pipe, filter, cdp_session, &limits)?;
+        let node = match locator {
+            SafeLocator::Ref { value } => projection.resolve_reference(value),
+            SafeLocator::Role { role, name } => projection.resolve_role(role, name),
+            SafeLocator::Text { value } => projection.resolve_text(value),
+            SafeLocator::Css { .. } | SafeLocator::TestId { .. } => {
+                unreachable!("selector locators are handled above")
+            }
+        }
+        .map_err(Self::locator_failure)?;
+        if node.node_id == 0 {
+            return Err(Self::cdp_failure());
+        }
+        Ok(node.node_id)
+    }
+
+    /// Content-box centre of a node, or an error when it has no layout.
+    fn box_model_center(
+        pipe: &CdpPipe,
+        filter: &CdpFilter,
+        cdp_session: &str,
+        node_id: u64,
+    ) -> Result<(f64, f64), RpcError> {
         let model = pipe
             .request_with_session(
-                &filter,
+                filter,
                 "DOM.getBoxModel",
                 None,
-                Some(&cdp_session),
+                Some(cdp_session),
                 serde_json::json!({"nodeId": node_id}),
             )
             .map_err(|_| Self::cdp_failure())?;
@@ -775,8 +865,256 @@ impl BrokerState {
         if coordinates.len() != 8 {
             return Err(Self::cdp_failure());
         }
+        let width = model
+            .pointer("/model/width")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let height = model
+            .pointer("/model/height")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        if width <= 0.0 || height <= 0.0 {
+            return Err(RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "Target element has no visible layout",
+            ));
+        }
         let x = (coordinates[0] + coordinates[2] + coordinates[4] + coordinates[6]) / 4.0;
         let y = (coordinates[1] + coordinates[3] + coordinates[5] + coordinates[7]) / 4.0;
+        Ok((x, y))
+    }
+
+    /// Current committed URL of a tab, canonicalized and stripped of query and
+    /// fragment. Query strings routinely carry tokens, so they never reach the
+    /// agent through this path.
+    fn tab_url(pipe: &CdpPipe, filter: &CdpFilter, cdp_session: &str) -> Result<String, RpcError> {
+        let history = pipe
+            .request_with_session(
+                filter,
+                "Page.getNavigationHistory",
+                None,
+                Some(cdp_session),
+                serde_json::json!({}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        let index = history
+            .get("currentIndex")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(Self::cdp_failure)? as usize;
+        let entries = history
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(Self::cdp_failure)?;
+        let raw = entries
+            .get(index)
+            .and_then(|entry| entry.get("url"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(Self::cdp_failure)?;
+        let mut parsed = url::Url::parse(raw).map_err(|_| Self::cdp_failure())?;
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        Ok(parsed.to_string())
+    }
+
+    pub fn handle_page_read_text(
+        &self,
+        params: PageReadTextParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        self.guard_observation(&params.session_id)?;
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        let limits = ViewLimits::clamped(None, params.max_chars);
+        let projection = match &params.locator {
+            Some(locator) => {
+                let node_id = Self::resolve_locator(&pipe, &filter, &cdp_session, locator)?;
+                Self::project_subtree(&pipe, &filter, &cdp_session, node_id, &limits)?
+            }
+            None => Self::project_document(&pipe, &filter, &cdp_session, &limits)?,
+        };
+        Ok(serde_json::json!({
+            "text": projection.text,
+            "truncated": projection.text_truncated,
+        }))
+    }
+
+    pub fn handle_page_snapshot_safe(
+        &self,
+        params: PageSnapshotParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        self.guard_observation(&params.session_id)?;
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        let limits = ViewLimits::clamped(params.max_nodes, None);
+        let mut projection = Self::project_document(&pipe, &filter, &cdp_session, &limits)?;
+
+        if params.check_visibility.unwrap_or(true) {
+            let mut probes = 0usize;
+            for node in projection.nodes.iter_mut() {
+                if node.structurally_hidden {
+                    node.visible = Some(false);
+                    continue;
+                }
+                if probes >= Self::MAX_VISIBILITY_PROBES {
+                    break;
+                }
+                probes += 1;
+                node.visible = Some(
+                    Self::box_model_center(&pipe, &filter, &cdp_session, node.node_id).is_ok(),
+                );
+            }
+        }
+
+        let url = Self::tab_url(&pipe, &filter, &cdp_session)?;
+        Ok(serde_json::json!({
+            "url": url,
+            "elements": projection.nodes,
+            "truncated": projection.nodes_truncated,
+        }))
+    }
+
+    /// Poll a bounded condition on the agent's behalf.
+    ///
+    /// The wait lives in the broker rather than in an agent retry loop so it is
+    /// bounded by construction, and so a page that never settles produces one
+    /// timeout instead of a stream of navigation and observation requests.
+    pub async fn handle_page_wait_for(
+        &self,
+        params: PageWaitForParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let timeout_ms = params
+            .timeout_ms
+            .unwrap_or(Self::DEFAULT_WAIT_TIMEOUT_MS)
+            .clamp(1, Self::MAX_WAIT_TIMEOUT_MS);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            self.guard_observation(&params.session_id)?;
+            let satisfied = self.evaluate_wait_condition(&params)?;
+            if satisfied {
+                return Ok(serde_json::json!({"satisfied": true}));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(RpcError::new(
+                    RpcErrorCode::WAIT_TIMEOUT,
+                    "Condition was not satisfied before the deadline",
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(
+                Self::WAIT_POLL_INTERVAL_MS,
+            ))
+            .await;
+        }
+    }
+
+    fn evaluate_wait_condition(&self, params: &PageWaitForParams) -> Result<bool, RpcError> {
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        match &params.condition {
+            WaitCondition::LocatorPresent { locator } => {
+                Ok(Self::resolve_locator(&pipe, &filter, &cdp_session, locator).is_ok())
+            }
+            WaitCondition::LocatorAbsent { locator } => {
+                Ok(Self::resolve_locator(&pipe, &filter, &cdp_session, locator).is_err())
+            }
+            WaitCondition::TextPresent { value } => {
+                let limits = ViewLimits::clamped(None, None);
+                let projection = Self::project_document(&pipe, &filter, &cdp_session, &limits)?;
+                Ok(projection
+                    .text
+                    .to_lowercase()
+                    .contains(&value.trim().to_lowercase()))
+            }
+            WaitCondition::UrlPrefix { value } => {
+                let current = Self::tab_url(&pipe, &filter, &cdp_session)?;
+                Ok(current.starts_with(value.as_str()))
+            }
+            WaitCondition::UrlChangedFrom { value } => {
+                let current = Self::tab_url(&pipe, &filter, &cdp_session)?;
+                Ok(current != *value)
+            }
+        }
+    }
+
+    /// Step through session history. Offset is `-1` for back, `1` for forward.
+    ///
+    /// The destination is re-checked against the navigation policy: history can
+    /// contain an entry that would be refused if it were requested directly,
+    /// and going back must not be a way to reach it.
+    fn navigate_history(
+        &self,
+        session_id: &BrowserSessionId,
+        tab_id: &str,
+        offset: i64,
+    ) -> Result<serde_json::Value, RpcError> {
+        let (pipe, filter) = self.browser_transport(session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, tab_id)?;
+        let history = pipe
+            .request_with_session(
+                &filter,
+                "Page.getNavigationHistory",
+                None,
+                Some(&cdp_session),
+                serde_json::json!({}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        let current = history
+            .get("currentIndex")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(Self::cdp_failure)?;
+        let entries = history
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(Self::cdp_failure)?;
+        let target_index = current + offset;
+        if target_index < 0 || target_index as usize >= entries.len() {
+            return Err(RpcError::new(
+                RpcErrorCode::INVALID_PARAMS,
+                "No such history entry",
+            ));
+        }
+        let entry = &entries[target_index as usize];
+        let raw_url = entry
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(Self::cdp_failure)?;
+        Self::safe_navigation_url(raw_url, true)?;
+        let entry_id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(Self::cdp_failure)?;
+        pipe.request_with_session(
+            &filter,
+            "Page.navigateToHistoryEntry",
+            None,
+            Some(&cdp_session),
+            serde_json::json!({"entryId": entry_id}),
+        )
+        .map_err(|_| Self::cdp_failure())?;
+        Ok(serde_json::json!({"navigated": true}))
+    }
+
+    pub fn handle_browser_back(
+        &self,
+        params: BrowserTabParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        self.navigate_history(&params.session_id, &params.tab_id, -1)
+    }
+
+    pub fn handle_browser_forward(
+        &self,
+        params: BrowserTabParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        self.navigate_history(&params.session_id, &params.tab_id, 1)
+    }
+
+    pub fn handle_page_click(
+        &self,
+        params: PageLocatorParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        let node_id = Self::resolve_locator(&pipe, &filter, &cdp_session, &params.locator)?;
+        let (x, y) = Self::box_model_center(&pipe, &filter, &cdp_session, node_id)?;
         for kind in ["mousePressed", "mouseReleased"] {
             pipe.request_with_session(
                 &filter,
@@ -800,10 +1138,9 @@ impl BrokerState {
                 "Public text rejected",
             ));
         }
-        let selector = params.locator.css().map_err(|_| Self::cdp_failure())?;
         let (pipe, filter) = self.browser_transport(&params.session_id)?;
         let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
-        let node_id = Self::locate_node(&pipe, &filter, &cdp_session, &selector)?;
+        let node_id = Self::resolve_locator(&pipe, &filter, &cdp_session, &params.locator)?;
         let node = pipe
             .request_with_session(
                 &filter,
@@ -813,11 +1150,11 @@ impl BrokerState {
                 serde_json::json!({"nodeId": node_id}),
             )
             .map_err(|_| Self::cdp_failure())?;
-        if Self::node_is_sensitive(&node) {
-            return Err(RpcError::new(
-                RpcErrorCode::SECURITY_VIOLATION,
-                "Protected field rejected",
-            ));
+        // One definition of "protected", shared with the page projection, so
+        // the view an agent is shown and the fields it may type into cannot
+        // disagree about which elements hold credentials.
+        if crate::dom_view::node_is_protected(&node) {
+            return Err(Self::locator_failure(ResolveError::Protected));
         }
         pipe.request_with_session(
             &filter,
@@ -836,6 +1173,60 @@ impl BrokerState {
         )
         .map_err(|_| Self::cdp_failure())?;
         Ok(serde_json::json!({"typed": true}))
+    }
+
+    pub fn handle_page_select(
+        &self,
+        params: PageSelectParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        if params.label.is_empty() || params.label.len() > 1024 || params.label.contains('\0') {
+            return Err(RpcError::new(
+                RpcErrorCode::INVALID_PARAMS,
+                "Public option rejected",
+            ));
+        }
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        let node_id = Self::resolve_locator(&pipe, &filter, &cdp_session, &params.locator)?;
+        let node = pipe
+            .request_with_session(
+                &filter,
+                "DOM.describeNode",
+                None,
+                Some(&cdp_session),
+                serde_json::json!({"nodeId": node_id}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        if crate::dom_view::node_is_protected(&node) {
+            return Err(Self::locator_failure(ResolveError::Protected));
+        }
+        pipe.request_with_session(
+            &filter,
+            "DOM.focus",
+            None,
+            Some(&cdp_session),
+            serde_json::json!({"nodeId": node_id}),
+        )
+        .map_err(|_| Self::cdp_failure())?;
+        pipe.request_with_session(
+            &filter,
+            "Input.insertText",
+            None,
+            Some(&cdp_session),
+            serde_json::json!({"text": params.label}),
+        )
+        .map_err(|_| Self::cdp_failure())?;
+        for kind in ["keyDown", "keyUp"] {
+            pipe.request_with_session(
+                &filter,
+                "Input.dispatchKeyEvent",
+                None,
+                Some(&cdp_session),
+                serde_json::json!({"type": kind, "key": "Enter", "code": "Enter"}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        }
+        Ok(serde_json::json!({"selected": true}))
     }
 
     pub fn register_page_context(&self, context: PageContext, session_id: BrowserSessionId) {
@@ -893,7 +1284,8 @@ impl BrokerState {
             authorization.recipe.content_hash,
             authorization.decision.policy_hash.clone(),
             now,
-            authorization.decision.ttl_seconds,
+            secretctl_domain::CapabilityDeadlines::from_policy(&authorization.decision),
+            None,
             // A policy may bound repeated authorizations, but each
             // secret-bearing execution capability is always single-use.
             1,
@@ -1049,6 +1441,121 @@ impl BrokerState {
             }
         }
         result
+    }
+
+    /// Resolve routing only from a fresh, trusted managed-browser context.
+    /// Ambiguity fails closed so the ergonomic SDK cannot become an origin oracle.
+    pub async fn handle_action_authenticate(
+        &self,
+        agent_id: AgentId,
+        params: ActionAuthenticateParams,
+    ) -> Result<ActionAuthenticateResult, RpcError> {
+        let credential = self
+            .store
+            .get_credential_by_name(&params.identity)
+            .map_err(|_| {
+                RpcError::new(RpcErrorCode::AUTH_POLICY_DENIED, "Identity is unavailable")
+            })?;
+        if credential.disabled_at.is_some() || credential.provider != self.provider.provider_name()
+        {
+            return Err(RpcError::new(
+                RpcErrorCode::AUTH_POLICY_DENIED,
+                "Identity is unavailable",
+            ));
+        }
+        let action = match params.action {
+            Some(action) if credential.allowed_actions.contains(&action) => action,
+            Some(_) => {
+                return Err(RpcError::new(
+                    RpcErrorCode::AUTH_POLICY_DENIED,
+                    "Identity is not permitted for this action",
+                ));
+            }
+            None if credential.allowed_actions.len() == 1 => credential.allowed_actions[0],
+            None => {
+                return Err(RpcError::new(
+                    RpcErrorCode::INVALID_PARAMS,
+                    "Credential has multiple actions; specify action",
+                ));
+            }
+        };
+
+        let now = Utc::now();
+        let mut candidates = {
+            let sessions = self.sessions.read().unwrap();
+            let contexts = self.page_contexts.read().unwrap();
+            let recipes = self.recipes.read().unwrap();
+            let mut candidates = Vec::new();
+            for (session_id, active) in sessions.iter() {
+                if active.session.state != BrowserSessionState::Active
+                    || now - active.session.last_heartbeat_at > chrono::Duration::seconds(10)
+                {
+                    continue;
+                }
+                for context in contexts
+                    .get(session_id)
+                    .into_iter()
+                    .flat_map(|tabs| tabs.values())
+                {
+                    if now - context.observed_at > chrono::Duration::seconds(2) {
+                        continue;
+                    }
+                    let matches = recipes.values().any(|recipe| {
+                        recipe.enabled
+                            && recipe.action == action
+                            && recipe.match_rule.top_origin.matches(&context.top_origin)
+                            && recipe
+                                .match_rule
+                                .frame_origin
+                                .as_ref()
+                                .is_none_or(|origin| origin.matches(&context.frame_origin))
+                            && recipe
+                                .match_rule
+                                .path_prefix
+                                .as_ref()
+                                .is_none_or(|prefix| context.path.starts_with(prefix))
+                    });
+                    if matches {
+                        candidates.push((session_id.clone(), context.clone()));
+                    }
+                }
+            }
+            candidates
+        };
+        if candidates.len() != 1 {
+            return Err(RpcError::new(
+                RpcErrorCode::INVALID_PARAMS,
+                if candidates.is_empty() {
+                    "No active managed page matches this credential action"
+                } else {
+                    "Multiple active managed pages match; use execute with an explicit target"
+                },
+            ));
+        }
+        let (browser_session_id, context) = candidates.pop().expect("one candidate");
+        let verified_origin = context.top_origin.clone();
+        let request = ActionRequestParams {
+            request_id: params.request_id.unwrap_or_default(),
+            action,
+            identity: params.identity,
+            target: secretctl_protocol::TargetOriginConstraint {
+                origin: verified_origin.clone(),
+                path_prefix: None,
+            },
+            browser_session_id: browser_session_id.clone(),
+            tab_hint: Some(context.tab_id),
+            reason: params.reason,
+            wait: params.wait,
+            timeout_ms: params.timeout_ms,
+            client_context: params.client_context,
+        };
+        let response = self.handle_action_request(agent_id, request).await?;
+        Ok(ActionAuthenticateResult {
+            response,
+            action,
+            verified_origin,
+            browser_session_id,
+        })
     }
 
     async fn handle_new_action_request(
@@ -1841,7 +2348,9 @@ impl BrokerState {
             let Some(entry) = caps.get(&capability_id) else {
                 continue;
             };
-            if entry.capability.state.is_terminal() || entry.capability.expires_at <= Utc::now() {
+            if entry.capability.state.is_terminal()
+                || entry.capability.consume_deadline <= Utc::now()
+            {
                 continue;
             }
             let recipes = self.recipes.read().unwrap();
@@ -2556,7 +3065,7 @@ impl BrokerState {
                 None
             },
         };
-        {
+        let durable_result = {
             let mut cursor = self.audit_cursor.lock().unwrap();
             let audit_event = create_audit_event(
                 cursor.next_sequence,
@@ -2574,17 +3083,45 @@ impl BrokerState {
                 Utc::now(),
             )
             .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
-            self.store
-                .finish_execution_with_audit(&completed_execution, &audit_event)
-                .map_err(|_| {
-                    RpcError::new(
-                        RpcErrorCode::INTERNAL_ERROR,
-                        "Durable execution result unavailable",
-                    )
+            let result = self
+                .store
+                .finish_execution_with_audit(&completed_execution, &audit_event);
+            if result.is_ok() {
+                cursor.next_sequence += 1;
+                cursor.latest_hash = audit_event.event_hash;
+            }
+            result
+        };
+        if durable_result.is_err() && params.status == "completed" {
+            // The credential was already consumed and the executor has reported
+            // success. Retrying could repeat a real side effect, so acknowledge
+            // the report while retaining an explicit non-retryable terminal state.
+            completed_execution.state = ExecutionState::CompletedEvidenceLost;
+            completed_execution.result_code = Some("COMPLETED_EVIDENCE_LOST".to_string());
+            {
+                let mut execs = self.executions.lock().unwrap();
+                let active = execs.get_mut(&params.execution_id).ok_or_else(|| {
+                    RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown execution ID")
                 })?;
-            cursor.next_sequence += 1;
-            cursor.latest_hash = audit_event.event_hash;
+                active.execution = completed_execution;
+            }
+            if let Some(request) = self.requests.write().unwrap().get_mut(&req_id) {
+                request.state = ActionRequestState::CompletedEvidenceLost;
+                request.result_code = Some("COMPLETED_EVIDENCE_LOST".to_string());
+                request.execution_id = Some(params.execution_id.clone());
+                request.completed_at = Some(Utc::now().to_rfc3339());
+            }
+            if let Some((filter, tab_id)) = self.execution_sensitive_filter(&params.execution_id) {
+                filter.exit_sensitive_window(tab_id);
+            }
+            return Ok(ExecutorResultResult { acknowledged: true });
         }
+        durable_result.map_err(|_| {
+            RpcError::new(
+                RpcErrorCode::INTERNAL_ERROR,
+                "Durable execution result unavailable",
+            )
+        })?;
         {
             let mut execs = self.executions.lock().unwrap();
             let active = execs.get_mut(&params.execution_id).ok_or_else(|| {

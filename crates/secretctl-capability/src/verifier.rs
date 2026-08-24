@@ -56,7 +56,14 @@ pub fn verify_and_consume_capability(
         });
     }
 
-    // 3. Check expiration
+    // 3. Check the consume deadline — and only the consume deadline.
+    //
+    // `execution_deadline` bounds a window that has not opened yet, and
+    // `step_deadline` bounds work that happens after release. Checking either
+    // here would refuse a consume that is still legitimately inside its
+    // secret-release window. Expiry at this point is also the one expiry that
+    // is safe to report as a clean failure: nothing has been released, so
+    // nothing can have happened at the destination.
     if now.timestamp() < claims.nbf {
         return Err(CapabilityError::BindingMismatch {
             field: "not_before",
@@ -64,11 +71,11 @@ pub fn verify_and_consume_capability(
             actual: now.timestamp().to_string(),
         });
     }
-    if now.timestamp() >= claims.exp || now >= capability.expires_at {
+    if now.timestamp() >= claims.consume_deadline || now >= capability.consume_deadline {
         capability.state = CapabilityState::Expired;
         return Err(CapabilityError::Expired(format!(
-            "Capability expired at {}",
-            capability.expires_at
+            "Capability consume window closed at {}",
+            capability.consume_deadline
         )));
     }
 
@@ -160,8 +167,17 @@ mod tests {
     use crate::token::mint_capability;
     use secretctl_crypto::KeyPair;
     use secretctl_domain::{
-        ActionKind, AgentId, BrowserSessionId, CanonicalOrigin, CredentialId, RecipeId, RequestId,
+        ActionKind, AgentId, BrowserSessionId, CanonicalOrigin, CapabilityDeadlines, CredentialId,
+        RecipeId, RequestId,
     };
+
+    fn test_deadlines() -> CapabilityDeadlines {
+        CapabilityDeadlines {
+            consume_ttl_seconds: 30,
+            execution_ttl_seconds: 120,
+            step_ttl_seconds: None,
+        }
+    }
 
     #[test]
     fn test_verify_and_consume_capability_success() {
@@ -189,7 +205,8 @@ mod tests {
             vec![1, 2, 3],
             vec![4, 5, 6],
             Utc::now(),
-            30,
+            test_deadlines(),
+            None,
             1,
         );
 
@@ -240,7 +257,8 @@ mod tests {
             vec![1, 2, 3],
             vec![4, 5, 6],
             Utc::now(),
-            30,
+            test_deadlines(),
+            None,
             1,
         );
 
@@ -288,7 +306,8 @@ mod tests {
                     vec![1, 2, 3],
                     vec![4, 5, 6],
                     Utc::now(),
-                    30,
+                    test_deadlines(),
+                    None,
                     1,
                 );
                 let context = ExecutionContextSnapshot {

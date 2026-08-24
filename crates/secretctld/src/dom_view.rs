@@ -16,15 +16,14 @@ use serde_json::Value;
 
 /// Element roles the projection is willing to name. Anything it cannot place
 /// confidently becomes `Generic`, which is never interactable.
-const INTERACTABLE_ROLES: &[&str] = &[
-    "link", "button", "textbox", "checkbox", "radio", "combobox",
-];
+const INTERACTABLE_ROLES: &[&str] = &["link", "button", "textbox", "checkbox", "radio", "combobox"];
 
 /// Attribute-name fragments that mark a field as credential-bearing. Kept in
 /// one place so `page.type_public`, the projection, and the executor cannot
 /// drift apart about what "protected" means.
-const PROTECTED_NAME_FRAGMENTS: &[&str] =
-    &["password", "passwd", "otp", "totp", "secret", "token", "cvv", "cvc"];
+const PROTECTED_NAME_FRAGMENTS: &[&str] = &[
+    "password", "passwd", "otp", "totp", "secret", "token", "cvv", "cvc",
+];
 
 const PROTECTED_AUTOCOMPLETE: &[&str] = &["current-password", "new-password", "one-time-code"];
 
@@ -393,7 +392,12 @@ fn derive_role(tag: &str, attributes: &Attributes) -> String {
         "button" => "button".to_string(),
         "select" => "combobox".to_string(),
         "textarea" => "textbox".to_string(),
-        "input" => match attributes.get("type").unwrap_or("text").to_ascii_lowercase().as_str() {
+        "input" => match attributes
+            .get("type")
+            .unwrap_or("text")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "button" | "submit" | "reset" | "image" => "button".to_string(),
             "checkbox" => "checkbox".to_string(),
             "radio" => "radio".to_string(),
@@ -496,7 +500,8 @@ fn collapse_whitespace(raw: &str) -> String {
         // Control and format characters (including bidi overrides) are dropped
         // rather than rendered: text reaching an agent or a log must not be
         // able to reorder what a human later reads.
-        if character.is_control() || matches!(character, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        if character.is_control()
+            || matches!(character, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         {
             continue;
         }
@@ -517,6 +522,16 @@ fn truncate_chars(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
+/// Whether a `DOM.describeNode` result names a credential-bearing element.
+///
+/// Exposed so the action handlers and the projection share one definition. A
+/// field the projection refuses to name must also be a field the agent cannot
+/// type into.
+pub fn node_is_protected(described: &Value) -> bool {
+    let node = described.get("node").unwrap_or(described);
+    Attributes::from_node(node).is_protected()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,7 +541,10 @@ mod tests {
         let attrs: Vec<Value> = attributes
             .iter()
             .flat_map(|(name, value)| {
-                [Value::String((*name).into()), Value::String((*value).into())]
+                [
+                    Value::String((*name).into()),
+                    Value::String((*value).into()),
+                ]
             })
             .collect();
         json!({
@@ -557,7 +575,11 @@ mod tests {
                         element(
                             "input",
                             4,
-                            &[("type", "text"), ("name", "username"), ("placeholder", "Username")],
+                            &[
+                                ("type", "text"),
+                                ("name", "username"),
+                                ("placeholder", "Username")
+                            ],
                             json!([])
                         ),
                         element(
@@ -566,15 +588,15 @@ mod tests {
                             &[("type", "password"), ("name", "password")],
                             json!([])
                         ),
-                        element(
-                            "button",
-                            6,
-                            &[("type", "submit")],
-                            json!([text("Sign in")])
-                        ),
+                        element("button", 6, &[("type", "submit")], json!([text("Sign in")])),
                     ])
                 ),
-                element("a", 7, &[("href", "/reset")], json!([text("Forgot password?")])),
+                element(
+                    "a",
+                    7,
+                    &[("href", "/reset")],
+                    json!([text("Forgot password?")])
+                ),
             ]),
         )
     }
@@ -656,7 +678,11 @@ mod tests {
         let page = element(
             "input",
             1,
-            &[("type", "text"), ("name", "code"), ("value", "CANARY-123456")],
+            &[
+                ("type", "text"),
+                ("name", "code"),
+                ("value", "CANARY-123456"),
+            ],
             json!([]),
         );
         let projection = PageProjection::from_node(&page, &ViewLimits::default());
@@ -698,7 +724,10 @@ mod tests {
         let limits = ViewLimits::clamped(None, Some(50));
         let projection = PageProjection::from_node(&page, &limits);
         assert!(projection.text_truncated);
-        assert_eq!(projection.text.chars().count(), 50);
+        // At most the cap. A trailing separator is trimmed, so the run may end
+        // one character short of it.
+        assert!(projection.text.chars().count() <= 50);
+        assert!(projection.text.chars().count() >= 49);
     }
 
     #[test]
@@ -828,12 +857,7 @@ mod tests {
 
     #[test]
     fn disabled_controls_are_reported_as_disabled() {
-        let page = element(
-            "button",
-            1,
-            &[("disabled", "")],
-            json!([text("Submit")]),
-        );
+        let page = element("button", 1, &[("disabled", "")], json!([text("Submit")]));
         let projection = PageProjection::from_node(&page, &ViewLimits::default());
         assert!(projection.nodes[0].disabled);
     }

@@ -5,7 +5,10 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import { execFileSync } from "child_process";
 import { LengthPrefixedSocket } from "./framing.js";
-import { ActionStatus, ConnectOptions, ExecuteRequest, ExecuteResult, SecretCtlErrorCode, SessionInfo } from "./types.js";
+import {
+  ActionStatus, AuthenticateOptions, BrowserTab, ConnectOptions, ExecuteRequest, ExecuteResult,
+  PageTextResult, SafeLocator, SafePageSnapshot, SecretCtlErrorCode, SessionInfo, WaitCondition,
+} from "./types.js";
 
 const PROHIBITED_RESPONSE_KEYS = [
   "password", "secret", "token", "seed", "cookie", "authorization",
@@ -58,7 +61,8 @@ export function parseExecuteResult(
   if (state === "completed") return { status: "completed", ...common };
   if (state === "capability_issued") return { status: "capability_issued", ...common };
   if (state === "denied" || state === "expired" || state === "cancelled" ||
-      state === "indeterminate" || state === "revoked" || state === "failed") {
+      state === "indeterminate" || state === "completed_evidence_lost" ||
+      state === "revoked" || state === "failed") {
     const candidate = typeof value.result_code === "string" ? value.result_code : "";
     const code = KNOWN_ERROR_CODES.has(candidate as SecretCtlErrorCode)
       ? candidate as SecretCtlErrorCode
@@ -67,7 +71,10 @@ export function parseExecuteResult(
       status: state,
       requestId: common.requestId,
       code,
-      safeMessage: `Action ended in ${state}`,
+      safeMessage: state === "completed_evidence_lost" || state === "indeterminate"
+        ? "The action may have completed. Do not retry automatically."
+        : `Action ended in ${state}`,
+      retryable: !["completed_evidence_lost", "indeterminate", "revoked"].includes(state),
       evidenceId: common.evidenceId,
     };
   }
@@ -329,9 +336,43 @@ export class SecretCtl {
         status: "failed",
         requestId,
         code: safeError.code || "INTERNAL_ERROR",
-        safeMessage: safeError.message || "Action failed"
+        safeMessage: safeError.message || "Action failed",
+        retryable: false,
       };
     }
+  }
+
+  /** Ask the broker to resolve the active managed page and credential action. */
+  public async authenticate(
+    credential: string,
+    reason: string,
+    options: AuthenticateOptions = {},
+  ): Promise<ExecuteResult> {
+    const result = await this.rpc("action.authenticate", {
+      identity: credential,
+      reason,
+      ...(options.action ? { action: options.action } : {}),
+      ...(options.requestId ? { request_id: options.requestId } : {}),
+      wait: true,
+      timeout_ms: options.timeoutMs || 60000,
+      ...(options.clientContext ? { client_context: options.clientContext } : {}),
+    });
+    if (!result || typeof result !== "object") throw new Error("Invalid authentication response");
+    const routed = result as Record<string, unknown>;
+    if (typeof routed.action !== "string" || typeof routed.verified_origin !== "string" ||
+        typeof routed.browser_session_id !== "string") {
+      throw new Error("Broker did not return a verified authentication context");
+    }
+    return parseExecuteResult(routed, {
+      requestId: typeof routed.request_id === "string" ? routed.request_id : options.requestId,
+      action: routed.action as ExecuteRequest["action"],
+      identity: credential,
+      target: { origin: routed.verified_origin },
+      browserSessionId: routed.browser_session_id,
+      reason,
+      timeoutMs: options.timeoutMs,
+      clientContext: options.clientContext,
+    });
   }
 
   public async status(requestId: string): Promise<ActionStatus> {
@@ -358,21 +399,25 @@ export class SecretCtl {
     };
   }
 
-  public async *subscribe(requestId: string, pollIntervalMs = 100): AsyncGenerator<ActionStatus> {
-    let previous = "";
+  public async *subscribe(requestId: string, timeoutMs = 30000): AsyncGenerator<ActionStatus> {
+    let previous: ActionStatus | undefined;
     while (true) {
-      const status = await this.status(requestId);
-      const fingerprint = `${status.state}\0${status.detail ?? ""}`;
-      if (fingerprint !== previous) {
-        yield status;
-        previous = fingerprint;
-      }
-      if (["completed", "denied", "expired", "cancelled", "indeterminate", "revoked", "failed"].includes(status.state)) return;
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      const result = await this.rpc("action.subscribe", {
+        request_id: requestId,
+        ...(previous ? { after_state: previous.state, after_detail: previous.detail } : {}),
+        timeout_ms: Math.min(timeoutMs, 30000),
+      });
+      const status: ActionStatus = {
+        requestId: result.request_id, state: result.state, detail: result.detail,
+      };
+      const changed = !previous || previous.state !== status.state || previous.detail !== status.detail;
+      if (changed) yield status;
+      previous = status;
+      if (["completed", "denied", "expired", "cancelled", "indeterminate", "completed_evidence_lost", "revoked", "failed"].includes(status.state)) return;
     }
   }
 
-  public async tabs(sessionId: string): Promise<Array<{ tab_id: string; url: string; title: string }>> {
+  public async tabs(sessionId: string): Promise<BrowserTab[]> {
     const result = await this.rpc("browser.tabs", { session_id: sessionId });
     return result.tabs;
   }
@@ -397,7 +442,7 @@ export class SecretCtl {
   public async click(
     sessionId: string,
     tabId: string,
-    locator: { kind: "css" | "test_id"; value: string }
+    locator: SafeLocator
   ): Promise<void> {
     await this.rpc("page.click", { session_id: sessionId, tab_id: tabId, locator });
   }
@@ -405,10 +450,59 @@ export class SecretCtl {
   public async typePublic(
     sessionId: string,
     tabId: string,
-    locator: { kind: "css" | "test_id"; value: string },
+    locator: SafeLocator,
     text: string
   ): Promise<void> {
     await this.rpc("page.type_public", { session_id: sessionId, tab_id: tabId, locator, text });
+  }
+
+  public async select(
+    sessionId: string, tabId: string, locator: SafeLocator, label: string,
+  ): Promise<void> {
+    await this.rpc("page.select", { session_id: sessionId, tab_id: tabId, locator, label });
+  }
+
+  public async readText(
+    sessionId: string,
+    tabId: string,
+    locator?: SafeLocator,
+    maxChars?: number,
+  ): Promise<PageTextResult> {
+    return this.rpc("page.read_text", {
+      session_id: sessionId, tab_id: tabId, locator, max_chars: maxChars,
+    });
+  }
+
+  public async snapshotSafe(
+    sessionId: string,
+    tabId: string,
+    maxNodes?: number,
+    checkVisibility = true,
+  ): Promise<SafePageSnapshot> {
+    return this.rpc("page.snapshot_safe", {
+      session_id: sessionId, tab_id: tabId, max_nodes: maxNodes,
+      check_visibility: checkVisibility,
+    });
+  }
+
+  public async waitFor(
+    sessionId: string,
+    tabId: string,
+    condition: WaitCondition,
+    timeoutMs = 10000,
+  ): Promise<boolean> {
+    const result = await this.rpc("page.wait_for", {
+      session_id: sessionId, tab_id: tabId, condition, timeout_ms: timeoutMs,
+    });
+    return result.satisfied === true;
+  }
+
+  public async back(sessionId: string, tabId: string): Promise<void> {
+    await this.rpc("browser.back", { session_id: sessionId, tab_id: tabId });
+  }
+
+  public async forward(sessionId: string, tabId: string): Promise<void> {
+    await this.rpc("browser.forward", { session_id: sessionId, tab_id: tabId });
   }
 
   public close() {

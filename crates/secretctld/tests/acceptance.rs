@@ -106,7 +106,8 @@ async fn setup_acceptance_broker() -> (
             browser_assurance: Some("managed".to_string()),
             require_user_presence: false,
             max_uses: 5,
-            max_ttl_seconds: 60,
+            max_consume_ttl_seconds: 60,
+            max_execution_ttl_seconds: 120,
         },
     };
 
@@ -606,7 +607,8 @@ async fn test_at_14_approval_timeout_retrieves_no_secret() {
                     browser_assurance: Some("managed".to_string()),
                     require_user_presence: true,
                     max_uses: 1,
-                    max_ttl_seconds: 60,
+                    max_consume_ttl_seconds: 60,
+                    max_execution_ttl_seconds: 120,
                 },
             }],
         }))
@@ -772,7 +774,7 @@ fn test_at_23_gateway_structural_absence_of_evaluate_and_cdp() {
 // =========================================================================
 
 #[tokio::test]
-async fn test_at_25_and_at_26_multi_step_flow_and_off_graph_invalidation() {
+async fn separate_single_step_requests_do_not_count_as_at_25_or_at_26() {
     let (broker, session_id, origin, agent_id, _) = setup_acceptance_broker().await;
 
     // Step 1: Password step
@@ -800,7 +802,9 @@ async fn test_at_25_and_at_26_multi_step_flow_and_off_graph_invalidation() {
 
     assert_eq!(step1_resp.state, ActionRequestState::CapabilityIssued);
 
-    // Step 2: TOTP step under same flow
+    // This second request is intentionally independent. Keeping this regression
+    // test prevents accidental coupling, but it is not evidence for AT-25/26:
+    // there is no flow_id, shared approval, or signed transition graph here.
     let step2_resp = broker
         .handle_action_request(
             agent_id,

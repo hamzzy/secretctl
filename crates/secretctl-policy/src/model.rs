@@ -16,16 +16,27 @@ pub struct RuleConditions {
     pub require_user_presence: bool,
     #[serde(default = "default_max_uses")]
     pub max_uses: u32,
-    #[serde(default = "default_max_ttl")]
-    pub max_ttl_seconds: u64,
+    /// Ceiling on the secret-release window. Kept short; this is not how long
+    /// the login may take.
+    #[serde(default = "default_max_consume_ttl", alias = "max_ttl_seconds")]
+    pub max_consume_ttl_seconds: u64,
+    /// Ceiling on how long the action may take once the secret has been
+    /// released. Separate from the consume window by design (see
+    /// `PolicyDecision`).
+    #[serde(default = "default_max_execution_ttl")]
+    pub max_execution_ttl_seconds: u64,
 }
 
 fn default_max_uses() -> u32 {
     1
 }
 
-fn default_max_ttl() -> u64 {
+fn default_max_consume_ttl() -> u64 {
     30
+}
+
+fn default_max_execution_ttl() -> u64 {
+    secretctl_domain::DEFAULT_EXECUTION_TTL_SECONDS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

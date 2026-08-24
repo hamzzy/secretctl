@@ -9,9 +9,9 @@ use secretctl_policy::{
     DestinationRule, PolicyDocument, PolicyEvaluator, PolicyRule, RuleConditions,
 };
 use secretctl_protocol::{
-    ActionRequestParams, BrowserRegisterParams, ExecutionNextParams, ExecutorConsumeParams,
-    ExecutorContextPayload, ExecutorHeartbeatParams, ExecutorPrepareParams, ExecutorResultParams,
-    TargetOriginConstraint,
+    ActionAuthenticateParams, ActionRequestParams, BrowserRegisterParams, ExecutionNextParams,
+    ExecutorConsumeParams, ExecutorContextPayload, ExecutorHeartbeatParams, ExecutorPrepareParams,
+    ExecutorResultParams, TargetOriginConstraint,
 };
 use secretctl_providers::{MemorySecretProvider, SecretProvider};
 use secretctl_store::SqliteStore;
@@ -83,7 +83,8 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
             browser_assurance: Some("managed".to_string()),
             require_user_presence: false,
             max_uses: 1,
-            max_ttl_seconds: 30,
+            max_consume_ttl_seconds: 30,
+            max_execution_ttl_seconds: 120,
         },
     };
 
@@ -194,6 +195,33 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
     );
 
     (state, session_id, origin)
+}
+
+#[tokio::test]
+async fn ergonomic_authentication_resolves_exactly_one_verified_managed_page() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    let result = broker
+        .handle_action_authenticate(
+            AgentId::new(),
+            ActionAuthenticateParams {
+                request_id: None,
+                action: None,
+                identity: "github-work".to_string(),
+                reason: "Sign in for the requested task".to_string(),
+                wait: false,
+                timeout_ms: 60_000,
+                client_context: None,
+            },
+        )
+        .await
+        .expect("one fresh matching page should route");
+    assert_eq!(result.action, ActionKind::AuthenticatePassword);
+    assert_eq!(result.verified_origin, origin);
+    assert_eq!(result.browser_session_id, session_id);
+    assert_eq!(
+        result.response.state,
+        secretctl_domain::ActionRequestState::CapabilityIssued
+    );
 }
 
 #[tokio::test]
@@ -869,7 +897,8 @@ async fn test_required_approval_denial_never_mints_capability() {
                     browser_assurance: Some("managed".to_string()),
                     require_user_presence: true,
                     max_uses: 1,
-                    max_ttl_seconds: 30,
+                    max_consume_ttl_seconds: 30,
+                    max_execution_ttl_seconds: 120,
                 },
             }],
         }))
@@ -943,7 +972,8 @@ async fn test_approval_timeout_retrieves_no_secret_and_is_audited() {
                     browser_assurance: Some("managed".to_string()),
                     require_user_presence: true,
                     max_uses: 1,
-                    max_ttl_seconds: 30,
+                    max_consume_ttl_seconds: 30,
+                    max_execution_ttl_seconds: 120,
                 },
             }],
         }))
