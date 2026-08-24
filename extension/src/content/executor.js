@@ -1,142 +1,147 @@
-/**
- * secretctl Content Script Executor
- * Executes in extension isolated world.
- * Preflight element verification, overlay hit-testing,
- * value injection with synthetic events, auto-submit, and memory cleanup.
- */
+/** Isolated-world preflight and commit executor. */
+const documentId = "doc_" + crypto.randomUUID();
+const prepared = new Map();
 
-async function preflightField(field, expectedOrigin) {
+function canonicalOrigin(value) {
+  const url = new URL(value);
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
+}
+
+function verifyField(field, expectedOrigin) {
   const matches = document.querySelectorAll(field.selector);
-  if (matches.length !== 1) {
-    throw new Error("FIELD_AMBIGUOUS");
-  }
-  const el = matches[0];
-
-  if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
+  if (matches.length === 0 && field.optional) return null;
+  if (matches.length !== 1) throw new Error("FIELD_AMBIGUOUS");
+  const element = matches[0];
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) ||
+      element.disabled || element.readOnly || !element.isConnected) {
     throw new Error("FIELD_NOT_EDITABLE");
   }
-  if (el.disabled || el.readOnly || !el.isConnected) {
-    throw new Error("FIELD_NOT_EDITABLE");
+  if (field.role === "password" &&
+      (!(element instanceof HTMLInputElement) || element.type.toLowerCase() !== "password")) {
+    throw new Error("FIELD_TYPE_MISMATCH");
   }
-
-  const rect = el.getBoundingClientRect();
-  if (rect.width < 10 || rect.height < 10) {
+  const rect = element.getBoundingClientRect();
+  const style = getComputedStyle(element);
+  if (rect.width < 10 || rect.height < 10 || rect.bottom <= 0 || rect.right <= 0 ||
+      rect.top >= innerHeight || rect.left >= innerWidth || style.display === "none" ||
+      style.visibility === "hidden" || Number.parseFloat(style.opacity) < 0.1) {
     throw new Error("FIELD_NOT_VISIBLE");
   }
-  if (rect.bottom <= 0 || rect.right <= 0 || rect.top >= innerHeight || rect.left >= innerWidth) {
-    throw new Error("FIELD_OUTSIDE_VIEWPORT");
+  const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (hit !== element && !element.contains(hit)) throw new Error("FIELD_OVERLAID");
+  const form = element.closest("form");
+  if (form?.action && canonicalOrigin(form.action) !== expectedOrigin) {
+    throw new Error("FORM_ACTION_MISMATCH");
   }
-
-  const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) < 0.1) {
-    throw new Error("FIELD_NOT_VISIBLE");
-  }
-
-  // Hit test center point to prevent overlay harvesting
-  const centerX = rect.left + rect.width / 2;
-  const centerY = rect.top + rect.height / 2;
-  const hit = document.elementFromPoint(centerX, centerY);
-  if (hit !== el && !el.contains(hit)) {
-    throw new Error("FIELD_OVERLAID");
-  }
-
-  // Verify form action if within a form
-  const form = el.closest("form");
-  if (form && form.action) {
-    const actionUrl = new URL(form.action, window.location.href);
-    if (actionUrl.origin !== expectedOrigin) {
-      throw new Error("FORM_ACTION_MISMATCH");
-    }
-  }
-
-  return el;
+  return element;
 }
 
-function injectValue(el, value) {
-  // Use prototype setter to trigger frameworks like React, Vue, Angular
-  const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
-  if (descriptor && descriptor.set) {
-    descriptor.set.call(el, value);
-  } else {
-    el.value = value;
-  }
-
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
+function injectValue(element, value) {
+  const prototype = element instanceof HTMLTextAreaElement
+    ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+  if (!descriptor?.set) throw new Error("FIELD_SETTER_UNAVAILABLE");
+  descriptor.set.call(element, value);
+  element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-async function executeInjection(fields, submitSelector, expectedOrigin) {
-  if (location.origin !== expectedOrigin) {
-    throw new Error("ORIGIN_MISMATCH");
+function preflight(fields, expectedOrigin, expectedDocumentId) {
+  if (expectedDocumentId !== documentId || canonicalOrigin(location.href) !== expectedOrigin) {
+    throw new Error("CONTEXT_MISMATCH");
   }
+  const elements = fields.map((field) => verifyField(field, expectedOrigin));
+  const nonce = crypto.randomUUID();
+  prepared.set(nonce, {
+    fields: structuredClone(fields),
+    elements,
+    expectedOrigin,
+    expiresAt: Date.now() + 3000
+  });
+  setTimeout(() => prepared.delete(nonce), 3000);
+  return { preflight_nonce: nonce, fields_verified_count: elements.filter(Boolean).length };
+}
 
-  // 1. Run preflight on all fields
-  const verifiedElements = [];
-  for (const field of fields) {
-    verifiedElements.push(await preflightField(field, expectedOrigin));
+function commit(preflightNonce, fields, submitSelector, expectedOrigin) {
+  const plan = prepared.get(preflightNonce);
+  prepared.delete(preflightNonce);
+  if (!plan || plan.expiresAt < Date.now() || canonicalOrigin(location.href) !== expectedOrigin ||
+      plan.expectedOrigin !== expectedOrigin) {
+    throw new Error("PREFLIGHT_EXPIRED");
   }
-
-  // 2. Perform injection
-  let fieldsFilled = 0;
-  for (let index = 0; index < fields.length; index++) {
-    const field = fields[index];
-    const el = verifiedElements[index];
-    if (!el.isConnected || document.querySelectorAll(field.selector).length !== 1) {
-      throw new Error("FIELD_MUTATED");
+  const filled = [];
+  try {
+    for (const field of fields) {
+      const index = plan.fields.findIndex((candidate) =>
+        candidate.role === field.role && candidate.selector === field.selector
+      );
+      if (index < 0) throw new Error("FIELD_NOT_IN_RECIPE");
+      const element = verifyField(plan.fields[index], expectedOrigin);
+      if (!element || element !== plan.elements[index]) throw new Error("FIELD_MUTATED");
+      if (field.clear_first) injectValue(element, "");
+      injectValue(element, field.encrypted_value);
+      field.encrypted_value = "";
+      filled.push(element);
     }
-    if (field.clear_first) {
-      injectValue(el, "");
-    }
-    injectValue(el, field.encrypted_value);
-    field.encrypted_value = "";
-    fieldsFilled++;
-  }
-
-  // 3. Submit if requested
-  let submitted = false;
-  if (submitSelector) {
-    const submitBtn = document.querySelector(submitSelector);
-    if (submitBtn) {
-      submitBtn.click();
+    let submitted = false;
+    if (submitSelector) {
+      const buttons = document.querySelectorAll(submitSelector);
+      if (buttons.length !== 1 || !(buttons[0] instanceof HTMLElement)) {
+        throw new Error("SUBMIT_AMBIGUOUS");
+      }
+      buttons[0].click();
       submitted = true;
     }
+    return {
+      submitted,
+      fields_filled_count: filled.length,
+      outcome_selector_matched: true
+    };
+  } catch (error) {
+    for (const element of filled) injectValue(element, "");
+    for (const field of fields) field.encrypted_value = "";
+    throw error;
   }
-
-  return {
-    submitted,
-    fields_filled_count: fieldsFilled,
-    outcome_selector_matched: true
-  };
 }
 
-// Only extension-originated runtime messages are accepted. Page-controlled
-// window messages are intentionally never an execution channel.
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!message || message.type !== "SECRETCTL_EXECUTE") {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only the extension service worker can send runtime messages to this
+  // listener; no window.postMessage or page event is accepted.
+  if (sender.id !== chrome.runtime.id || !message) return;
+  if (message.type === "SECRETCTL_MEASURE") {
+    sendResponse({ document_id: documentId, href: location.href });
     return;
   }
-  const { fields, submitSelector, executionId, expectedOrigin } = message;
-  executeInjection(fields, submitSelector, expectedOrigin)
-    .then((evidence) => sendResponse({
-      execution_id: executionId,
-      status: "completed",
-      result_code: "SUCCESS",
-      evidence
-    }))
-    .catch(() => {
-      for (const field of fields || []) {
-        const element = document.querySelector(field.selector);
-        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-          injectValue(element, "");
-        }
-        field.encrypted_value = "";
-      }
+  if (message.type === "SECRETCTL_PREFLIGHT") {
+    try {
+      sendResponse(preflight(message.fields, message.expectedOrigin, message.expectedDocumentId));
+    } catch (_) {
+      sendResponse({ error: "PREFLIGHT_FAILED" });
+    }
+    return;
+  }
+  if (message.type === "SECRETCTL_COMMIT") {
+    try {
+      const evidence = commit(
+        message.preflightNonce,
+        message.fields,
+        message.submitSelector,
+        message.expectedOrigin
+      );
       sendResponse({
-        execution_id: executionId,
+        execution_id: message.executionId,
+        status: "completed",
+        result_code: "SUCCESS",
+        evidence
+      });
+    } catch (_) {
+      sendResponse({
+        execution_id: message.executionId,
         status: "failed",
-        result_code: "PREFLIGHT_FAILED",
+        result_code: "COMMIT_FAILED",
         evidence: null
       });
-    });
-  return true;
+    }
+  }
 });

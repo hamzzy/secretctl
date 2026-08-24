@@ -2,13 +2,12 @@
   "manifest_version": 3,
   "name": "secretctl Browser Enforcement",
   "version": "1.0.0",
+  "key": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDRVmK/bYE7BV93zRv7vpH5vYXMtobMl1ZzvtjqCBAAh9fElj4tq+bBylYGO1xjbB2B8yRtUKX2y19e71Fx7nTeybkcal0d4GWamPVsMpE8XiiMox+keTJ0N14cZy/cU8+FQO6pIZ3COXs3eD2A8Zn18Ydp4ULFoQrRMPidKFHuawIDAQAB",
   "description": "Deterministic browser credential execution and capability verification for AI agents.",
   "permissions": [
     "nativeMessaging",
     "tabs",
-    "webNavigation",
-    "scripting",
-    "activeTab"
+    "webNavigation"
   ],
   "host_permissions": [
     "https://*/*",

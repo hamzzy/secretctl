@@ -141,3 +141,27 @@ body {
   user-select: text;
   cursor: text;
 }
+
+/* Motion is deliberately near-invisible. A credential operation is not a place
+ * for flourish: the panel settles, it does not perform (spec §34). The global
+ * prefers-reduced-motion rule above collapses all of it to nothing. */
+@keyframes settle-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.settle {
+  animation: settle-in 120ms ease-out;
+}
+
+/* State text cross-fades rather than snapping, so a change in the header reads
+ * as the same element updating instead of a new one appearing. */
+.state-text {
+  transition: color 160ms ease-out;
+}

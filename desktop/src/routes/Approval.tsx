@@ -4,6 +4,7 @@ import { AgentText, VerifiedField } from "../components/AgentText";
 import { Divider, displayOrigin } from "../components/Chrome";
 import { RiskPill } from "../components/StateIcon";
 import { useCountdown } from "../hooks";
+import { useDismissOnEscape } from "../keyboard";
 import type { AuthorizationRequest, CommandError } from "../types";
 
 /**
@@ -22,6 +23,7 @@ export function Approval({ approvalId }: { approvalId: string }) {
   const [showGrantReview, setShowGrantReview] = useState(false);
   const [gone, setGone] = useState<string | null>(null);
   const remaining = useCountdown(request?.expires_at);
+  useDismissOnEscape();
 
   // Always re-read from the daemon on open. The notification may be seconds
   // stale, and the request may already have expired or been decided elsewhere.
@@ -179,10 +181,14 @@ export function Approval({ approvalId }: { approvalId: string }) {
           )}
 
           <div className="flex items-center gap-2">
+            {/* Deny takes initial focus. Nothing that grants authority is ever
+                one keystroke from a window that opened by itself; the safe
+                action is the default one. */}
             <button
               className="btn btn-danger flex-1"
               disabled={busy}
               onClick={() => act(() => api.deny(request))}
+              autoFocus
             >
               Deny
             </button>
@@ -192,7 +198,6 @@ export function Approval({ approvalId }: { approvalId: string }) {
               className="btn btn-primary flex-1"
               disabled={busy || expired}
               onClick={() => act(() => api.approveOnce(request))}
-              autoFocus
             >
               Authorize once
             </button>
@@ -298,7 +303,7 @@ function StandingAuthorizationReview({
           </p>
           {error && <ErrorNote error={error} />}
           <div className="flex items-center gap-2">
-            <button className="btn flex-1" disabled={busy} onClick={onCancel}>
+            <button className="btn flex-1" disabled={busy} onClick={onCancel} autoFocus>
               Cancel
             </button>
             <button

@@ -45,8 +45,13 @@ export function ProtectionIndicator({
       <span aria-hidden className="text-sm" style={{ color: entry.tone }}>
         {entry.glyph}
       </span>
-      {showLabel && <span className="text-base">{entry.label}</span>}
-      <span className="sr-only">{entry.label}</span>
+      {/* The label is announced once: visibly when shown, otherwise via the
+          screen-reader-only copy. Rendering both duplicated it. */}
+      {showLabel ? (
+        <span className="text-base">{entry.label}</span>
+      ) : (
+        <span className="sr-only">{entry.label}</span>
+      )}
     </span>
   );
 }

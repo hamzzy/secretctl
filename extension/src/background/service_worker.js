@@ -1,160 +1,252 @@
-/**
- * secretctl MV3 Background Service Worker
- * Manages native messaging connection, authoritative page measurements,
- * navigation epochs, and execution dispatching.
- */
-
+/** Trusted MV3 coordinator. Page code never receives capabilities or values. */
 const NATIVE_HOST_NAME = "com.secretctl.native_host";
 
 let nativePort = null;
-let browserSessionId = "bs_" + crypto.randomUUID();
-let tabEpochs = new Map(); // tabId -> number
-let pendingRequests = new Map(); // requestId -> { resolve, reject }
+let browserSessionId = null;
+let sessionMaterial = null;
+let pollTimer = null;
+const tabEpochs = new Map();
+const pendingRequests = new Map();
+/** Set only while a capability is actually being consumed. The popup reports
+ *  protection state from observed values like this one, never from an
+ *  assumption that things are fine. */
+let executionInFlight = null;
 
-function connectNative() {
+function b64urlBytes(value) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
+  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+}
+
+function canonicalOrigin(value) {
+  const url = new URL(value);
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function sendNativeRequest(method, params, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    if (!nativePort) return reject(new Error("native host unavailable"));
+    const id = "rpc_" + crypto.randomUUID();
+    pendingRequests.set(id, { resolve, reject });
+    nativePort.postMessage({ jsonrpc: "2.0", id, method, params });
+    setTimeout(() => {
+      if (pendingRequests.delete(id)) reject(new Error("native request timeout"));
+    }, timeoutMs);
+  });
+}
+
+async function connectNative() {
+  if (nativePort) return;
   try {
-    nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
-
-    nativePort.onMessage.addListener((message) => {
-      if (message.id && pendingRequests.has(message.id)) {
-        const { resolve, reject } = pendingRequests.get(message.id);
-        pendingRequests.delete(message.id);
-        if (message.error) {
-          reject(message.error);
-        } else {
-          resolve(message.result);
-        }
-      }
+    const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    nativePort = port;
+    port.onMessage.addListener((message) => {
+      const pending = pendingRequests.get(message.id);
+      if (!pending) return;
+      pendingRequests.delete(message.id);
+      message.error ? pending.reject(new Error(message.error.message || "broker rejected request"))
+        : pending.resolve(message.result);
     });
-
-    nativePort.onDisconnect.addListener(() => {
-      console.warn("Disconnected from secretctl native host. Retrying in 2s...");
+    port.onDisconnect.addListener(() => {
       nativePort = null;
+      browserSessionId = null;
+      sessionMaterial = null;
+      for (const pending of pendingRequests.values()) pending.reject(new Error("native host disconnected"));
+      pendingRequests.clear();
+      clearTimeout(pollTimer);
       setTimeout(connectNative, 2000);
     });
 
-    console.info("Connected to secretctl native host.");
-  } catch (err) {
-    console.error("Failed to connect to secretctl native host:", err);
+    const manifest = chrome.runtime.getManifest();
+    const registration = await sendNativeRequest("browser.register", {
+      // The native host replaces launch-controlled values from Chrome's
+      // inherited environment; extension-provided placeholders are untrusted.
+      instance_id: "bi_untrusted",
+      launcher_nonce: "untrusted",
+      profile_id: "untrusted",
+      extension_id: chrome.runtime.id,
+      extension_version: manifest.version,
+      extension_key_id: chrome.runtime.id,
+      browser_version: navigator.userAgent
+    });
+    browserSessionId = registration.browser_session_id;
+    sessionMaterial = await crypto.subtle.importKey(
+      "raw", b64urlBytes(registration.session_material), { name: "AES-GCM" }, false, ["decrypt"]
+    );
+    await reportPageContexts();
+    schedulePoll(0);
+  } catch (_) {
+    nativePort = null;
+    setTimeout(connectNative, 2000);
   }
 }
 
-connectNative();
-
-// Track navigation epochs per tab
 chrome.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId === 0) {
-    const currentEpoch = (tabEpochs.get(details.tabId) || 0) + 1;
-    tabEpochs.set(details.tabId, currentEpoch);
+  tabEpochs.set(details.tabId, (tabEpochs.get(details.tabId) || 0) + 1);
+  if (details.frameId === 0) setTimeout(reportPageContexts, 100);
+});
+chrome.tabs.onRemoved.addListener((tabId) => tabEpochs.delete(tabId));
+
+async function measureContext(tabId, frameId = 0) {
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.url || !/^https?:/.test(tab.url)) throw new Error("unsupported page scheme");
+  const measured = await chrome.tabs.sendMessage(tabId, { type: "SECRETCTL_MEASURE" }, { frameId });
+  const top = new URL(tab.url);
+  return {
+    browser_session_id: browserSessionId,
+    tab_id: tabId,
+    frame_id: frameId,
+    document_id: measured.document_id,
+    navigation_epoch: tabEpochs.get(tabId) || 1,
+    top_origin: canonicalOrigin(top.href),
+    frame_origin: canonicalOrigin(measured.href),
+    path: new URL(measured.href).pathname,
+    path_sha256: await sha256Hex(new URL(measured.href).pathname),
+    tls: new URL(measured.href).protocol === "https:",
+    incognito: Boolean(tab.incognito)
+  };
+}
+
+async function reportPageContexts() {
+  if (!browserSessionId || !nativePort) return;
+  const tabs = await chrome.tabs.query({ active: true });
+  for (const tab of tabs) {
+    if (!tab.id || !tab.url || !/^https?:/.test(tab.url)) continue;
+    try {
+      await sendNativeRequest("executor.prepare", { context: await measureContext(tab.id) });
+    } catch (_) { /* inaccessible pages are intentionally unavailable */ }
   }
-});
+}
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  tabEpochs.delete(tabId);
-});
-
-// Periodic heartbeat
-setInterval(() => {
-  if (!nativePort) return;
-  chrome.tabs.query({ active: true }, (tabs) => {
-    sendNativeRequest("executor.heartbeat", {
+setInterval(async () => {
+  if (!browserSessionId || !nativePort) return;
+  try {
+    const tabs = await chrome.tabs.query({});
+    await sendNativeRequest("executor.heartbeat", {
       browser_session_id: browserSessionId,
       active_tab_count: tabs.length,
       timestamp: new Date().toISOString()
-    }).catch((err) => {
-      console.warn("Heartbeat error:", err);
     });
-  });
+    await reportPageContexts();
+  } catch (_) { /* disconnect handler owns reconnection */ }
 }, 5000);
 
-function sendNativeRequest(method, params) {
-  return new Promise((resolve, reject) => {
-    if (!nativePort) {
-      return reject(new Error("Native port is not connected"));
-    }
-    const id = "rpc_" + crypto.randomUUID();
-    pendingRequests.set(id, { resolve, reject });
-
-    nativePort.postMessage({
-      jsonrpc: "2.0",
-      id,
-      method,
-      params
-    });
-
-    setTimeout(() => {
-      if (pendingRequests.has(id)) {
-        pendingRequests.delete(id);
-        reject(new Error("Request timeout"));
-      }
-    }, 15000);
-  });
+function schedulePoll(delay = 250) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollExecution, delay);
 }
 
-// Listen for execution commands from extension or content script
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === "MEASURE_CONTEXT") {
-    const tabId = sender.tab ? sender.tab.id : 0;
-    const epoch = tabEpochs.get(tabId) || 1;
-    const frameUrl = new URL(sender.url || sender.tab?.url || "https://unknown.invalid/");
-    const topUrl = new URL(sender.tab?.url || frameUrl.href);
-    const path = frameUrl.pathname;
+async function decryptEnvelope(result) {
+  if (!sessionMaterial || !result.secret_envelope) throw new Error("secret envelope unavailable");
+  const plaintext = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: b64urlBytes(result.secret_envelope.nonce),
+      additionalData: new TextEncoder().encode(result.execution_id)
+    },
+    sessionMaterial,
+    b64urlBytes(result.secret_envelope.ciphertext)
+  );
+  return JSON.parse(new TextDecoder().decode(plaintext));
+}
 
-    crypto.subtle.digest("SHA-256", new TextEncoder().encode(path)).then((digest) => {
-      const pathSha256 = Array.from(new Uint8Array(digest), (byte) =>
-        byte.toString(16).padStart(2, "0")
-      ).join("");
-      sendResponse({
-        browser_session_id: browserSessionId,
-        tab_id: tabId,
-        frame_id: sender.frameId || 0,
-        document_id: sender.documentId || "doc_" + tabId + "_" + epoch,
-        navigation_epoch: epoch,
-        top_origin: topUrl.origin,
-        frame_origin: frameUrl.origin,
-        path,
-        path_sha256: pathSha256,
-        tls: frameUrl.protocol === "https:"
-      });
-    }).catch(() => sendResponse({ error: "Unable to measure page path" }));
-    return true;
+async function executeOffer(offer) {
+  executionInFlight = { tabId: offer.tab_id, origin: offer.top_origin, startedAt: Date.now() };
+  try {
+    return await runOffer(offer);
+  } finally {
+    executionInFlight = null;
   }
+}
 
-  if (message.type === "EXECUTE_CONSUME") {
-    sendNativeRequest("executor.consume", message.params)
-      .then(async (res) => {
-        const context = message.params.current_context;
-        const executionResult = await chrome.tabs.sendMessage(
-          context.tab_id,
-          {
-            type: "SECRETCTL_EXECUTE",
-            fields: res.fields,
-            submitSelector: res.auto_submit_selector,
-            executionId: res.execution_id,
-            expectedOrigin: typeof context.top_origin === "string"
-              ? context.top_origin
-              : `${context.top_origin.scheme}://${context.top_origin.host}:${context.top_origin.port}`
-          },
-          { frameId: context.frame_id }
-        );
-        await sendNativeRequest("executor.result", executionResult);
-        sendResponse({
-          success: true,
-          result: {
-            execution_id: res.execution_id,
-            status: executionResult.status,
-            result_code: executionResult.result_code
-          }
-        });
-      })
-      .catch((err) => sendResponse({ success: false, error: err }));
-    return true;
+async function runOffer(offer) {
+  const context = await measureContext(offer.tab_id, offer.frame_id);
+  if (context.document_id !== offer.document_id ||
+      context.navigation_epoch !== offer.navigation_epoch ||
+      context.top_origin !== offer.top_origin ||
+      context.frame_origin !== offer.frame_origin) {
+    throw new Error("execution context changed");
   }
+  // DOM verification is deliberately completed before executor.consume can
+  // trigger a provider retrieval.
+  const preflight = await chrome.tabs.sendMessage(
+    offer.tab_id,
+    {
+      type: "SECRETCTL_PREFLIGHT",
+      fields: offer.fields,
+      expectedOrigin: offer.frame_origin,
+      expectedDocumentId: offer.document_id
+    },
+    { frameId: offer.frame_id }
+  );
+  if (!preflight || preflight.error || !preflight.preflight_nonce) {
+    throw new Error("page preflight rejected");
+  }
+  const consumed = await sendNativeRequest("executor.consume", {
+    capability_token: offer.capability_token,
+    session_signature: "authenticated-native-session",
+    current_context: await measureContext(offer.tab_id, offer.frame_id)
+  });
+  const envelope = await decryptEnvelope(consumed);
+  const executionResult = await chrome.tabs.sendMessage(
+    offer.tab_id,
+    {
+      type: "SECRETCTL_COMMIT",
+      preflightNonce: preflight.preflight_nonce,
+      fields: envelope.fields,
+      submitSelector: offer.auto_submit_selector,
+      executionId: consumed.execution_id,
+      expectedOrigin: offer.frame_origin
+    },
+    { frameId: offer.frame_id }
+  );
+  await sendNativeRequest("executor.result", executionResult);
+}
 
-  if (message.type === "REPORT_RESULT") {
-    sendNativeRequest("executor.result", message.params)
-      .then((res) => sendResponse({ success: true, result: res }))
-      .catch((err) => sendResponse({ success: false, error: err }));
-    return true;
-  }
+async function pollExecution() {
+  if (!browserSessionId || !nativePort) return schedulePoll(1000);
+  try {
+    const next = await sendNativeRequest("execution.next", { browser_session_id: browserSessionId });
+    if (next.offer) await executeOffer(next.offer);
+  } catch (_) { /* failure is safe; a consumed envelope is never requested again */ }
+  schedulePoll(250);
+}
+
+/**
+ * Status for the browser-action popup.
+ *
+ * Every field is read from live worker state. There is deliberately no default
+ * that reports health: if the native host is gone, `connected` is false and the
+ * popup says protection cannot be verified rather than staying green.
+ */
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== "SECRETCTL_POPUP_STATUS") return false;
+  chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+    const tab = tabs[0];
+    let origin = null;
+    if (tab?.url && /^https?:/.test(tab.url)) {
+      try {
+        origin = canonicalOrigin(tab.url);
+      } catch (_) {
+        origin = null;
+      }
+    }
+    sendResponse({
+      connected: Boolean(nativePort) && Boolean(browserSessionId),
+      // Enforcement only covers pages the content script can measure.
+      enforceable: origin !== null,
+      origin,
+      navigationEpoch: tab?.id ? tabEpochs.get(tab.id) || null : null,
+      executing: Boolean(executionInFlight),
+      executingOrigin: executionInFlight?.origin ?? null
+    });
+  });
+  return true; // response is asynchronous
 });
+
+connectNative();

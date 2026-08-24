@@ -113,7 +113,7 @@ export function Popover() {
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="flex h-full flex-col overflow-y-auto rounded-xl"
+      className="settle flex h-full flex-col overflow-y-auto rounded-xl"
       style={{ background: "var(--bg-raised)", boxShadow: "var(--shadow)" }}
     >
       {children}
@@ -125,10 +125,14 @@ function Header({ status }: { status: Status }) {
   return (
     <header className="px-3.5 pb-2.5 pt-3">
       <div className="flex items-baseline justify-between">
-        <span className="text-lg font-semibold">secretctl</span>
-        <ProtectionIndicator state={status.protection} showLabel={false} />
+        <h1 className="text-lg font-semibold">secretctl</h1>
       </div>
-      <div className="mt-0.5 text-sm" style={{ color: "var(--text-secondary)" }}>
+      <div
+        className="state-text mt-0.5 text-sm"
+        style={{ color: "var(--text-secondary)" }}
+        role="status"
+        aria-live="polite"
+      >
         <ProtectionIndicator state={status.protection} showLabel />
       </div>
       <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5 text-xs" style={{ color: "var(--text-tertiary)" }}>

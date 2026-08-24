@@ -3,6 +3,7 @@ import { api } from "../api";
 import { Empty, displayOrigin, formatDate, relativeTime } from "../components/Chrome";
 import { OutcomeIcon, ProtectionIndicator, RiskPill } from "../components/StateIcon";
 import { usePolled, useStatus } from "../hooks";
+import { useDismissOnEscape } from "../keyboard";
 import type {
   ActivityEvent,
   Agent,
@@ -31,6 +32,7 @@ export function Manage({ section }: { section: string }) {
     (SECTIONS.find(([id]) => id === section)?.[0] ?? "activity") as SectionId,
   );
   const status = useStatus();
+  useDismissOnEscape();
 
   return (
     <div className="flex h-full" style={{ background: "var(--bg)" }}>
@@ -51,6 +53,7 @@ export function Manage({ section }: { section: string }) {
           <button
             key={id}
             onClick={() => setActive(id)}
+            aria-current={active === id ? "page" : undefined}
             className="rounded-md px-2 py-1.5 text-left text-base"
             style={{
               background: active === id ? "var(--bg-raised)" : "transparent",
