@@ -389,17 +389,79 @@ impl BrokerState {
             },
         )?;
 
-        // Retrieve secret bytes from Keychain provider ONLY for executor
-        let secret_bytes = self
-            .provider
-            .get_secret(&credential_name)
-            .await
-            .map_err(|e| {
-                RpcError::new(
-                    RpcErrorCode::INTERNAL_ERROR,
-                    format!("Failed to retrieve secret: {}", e),
-                )
-            })?;
+        // Retrieve secret bytes or compute TOTP based on action kind
+        let fields = match claims.action {
+            ActionKind::AuthenticateTotp => {
+                let seed_bytes = self
+                    .provider
+                    .get_secret(&credential_name)
+                    .await
+                    .map_err(|e| {
+                        RpcError::new(
+                            RpcErrorCode::INTERNAL_ERROR,
+                            format!("Failed to retrieve TOTP seed: {}", e),
+                        )
+                    })?;
+
+                let generator = secretctl_crypto::TotpGenerator::new();
+                let (totp_code, _time_step) = generator
+                    .generate(seed_bytes.as_bytes(), now.timestamp() as u64)
+                    .map_err(|_| {
+                        RpcError::new(
+                            RpcErrorCode::CAPABILITY_EXPIRED,
+                            "TOTP time step expired or margin too close",
+                        )
+                    })?;
+
+                vec![ResolvedFieldInjection {
+                    role: "totp_code".to_string(),
+                    selector: "input[autocomplete='one-time-code'], input[name='otp'], input[type='tel']".to_string(),
+                    optional: false,
+                    clear_first: true,
+                    encrypted_value: totp_code,
+                }]
+            }
+            ActionKind::FormSensitiveFill => {
+                let secret_bytes = self
+                    .provider
+                    .get_secret(&credential_name)
+                    .await
+                    .map_err(|e| {
+                        RpcError::new(
+                            RpcErrorCode::INTERNAL_ERROR,
+                            format!("Failed to retrieve sensitive form fields: {}", e),
+                        )
+                    })?;
+
+                vec![ResolvedFieldInjection {
+                    role: "sensitive_text".to_string(),
+                    selector: "input[name='sensitive_value'], textarea".to_string(),
+                    optional: false,
+                    clear_first: true,
+                    encrypted_value: String::from_utf8_lossy(secret_bytes.as_bytes()).to_string(),
+                }]
+            }
+            _ => {
+                let secret_bytes = self
+                    .provider
+                    .get_secret(&credential_name)
+                    .await
+                    .map_err(|e| {
+                        RpcError::new(
+                            RpcErrorCode::INTERNAL_ERROR,
+                            format!("Failed to retrieve secret: {}", e),
+                        )
+                    })?;
+
+                vec![ResolvedFieldInjection {
+                    role: "password".to_string(),
+                    selector: "input[type=password]".to_string(),
+                    optional: false,
+                    clear_first: true,
+                    encrypted_value: String::from_utf8_lossy(secret_bytes.as_bytes()).to_string(),
+                }]
+            }
+        };
 
         // Audit secret accessed
         self.record_audit_event(
@@ -443,15 +505,6 @@ impl BrokerState {
                 },
             );
         }
-
-        // Return fields with values to the trusted executor channel
-        let fields = vec![ResolvedFieldInjection {
-            role: "password".to_string(),
-            selector: "input[type=password]".to_string(),
-            optional: false,
-            clear_first: true,
-            encrypted_value: String::from_utf8_lossy(secret_bytes.as_bytes()).to_string(),
-        }];
 
         Ok(ExecutorConsumeResult {
             execution_id,

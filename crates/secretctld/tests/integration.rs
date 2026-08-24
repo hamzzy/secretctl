@@ -24,19 +24,31 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         .store_secret("github-work", b"super_secret_password_123")
         .await
         .expect("stored secret");
+    provider
+        .store_secret("github-totp", b"12345678901234567890")
+        .await
+        .expect("stored totp seed");
+    provider
+        .store_secret("account-recovery", b"REC-8842-9911-3320")
+        .await
+        .expect("stored recovery code");
 
     let origin = CanonicalOrigin::parse("https://github.com:443").expect("valid origin");
 
     let rule = PolicyRule {
         id: secretctl_domain::RuleId::parse("rule_github").unwrap(),
-        description: Some("Allow github login".to_string()),
+        description: Some("Allow github login and totp".to_string()),
         effect: secretctl_domain::PolicyEffect::Allow,
         principals: vec!["*".to_string()],
-        credentials: vec!["github-work".to_string()],
-        actions: vec![ActionKind::AuthenticatePassword],
+        credentials: vec!["github-work".to_string(), "github-totp".to_string(), "account-recovery".to_string()],
+        actions: vec![
+            ActionKind::AuthenticatePassword,
+            ActionKind::AuthenticateTotp,
+            ActionKind::FormSensitiveFill,
+        ],
         destinations: vec![DestinationRule {
             origin: origin.clone(),
-            path_prefix: Some("/login".to_string()),
+            path_prefix: None,
         }],
         conditions: RuleConditions {
             browser_assurance: Some("managed".to_string()),
@@ -324,4 +336,131 @@ async fn test_epoch_invalidation_fails_closed() {
     assert!(consume_res.is_err());
     let err = consume_res.unwrap_err();
     assert_eq!(err.code, secretctl_protocol::RpcErrorCode::EPOCH_INVALIDATED.0);
+}
+
+#[tokio::test]
+async fn test_totp_execution_flow() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    let agent_id = AgentId::new();
+    let request_id = RequestId::new();
+
+    // 1. Agent requests TOTP
+    let agent_req = ActionRequestParams {
+        request_id: request_id.clone(),
+        action: ActionKind::AuthenticateTotp,
+        identity: "github-totp".to_string(),
+        target: TargetOriginConstraint {
+            origin: origin.clone(),
+            path_prefix: None,
+        },
+        browser_session_id: session_id.clone(),
+        tab_hint: Some(1),
+        reason: "Two factor check".to_string(),
+        wait: true,
+        timeout_ms: 30000,
+        client_context: None,
+    };
+
+    let agent_resp = broker
+        .handle_action_request(agent_id, agent_req)
+        .await
+        .expect("TOTP action request should succeed");
+
+    assert_eq!(agent_resp.state, secretctl_domain::ActionRequestState::CapabilityIssued);
+
+    let token = {
+        let caps = broker.capabilities.lock().unwrap();
+        caps.values().next().unwrap().token.clone()
+    };
+
+    let context = ExecutorContextPayload {
+        browser_session_id: session_id.clone(),
+        tab_id: 1,
+        frame_id: 0,
+        document_id: "doc-1".to_string(),
+        navigation_epoch: 1,
+        top_origin: origin.clone(),
+        frame_origin: origin.clone(),
+        path_sha256: "path-hash".to_string(),
+        tls: true,
+        incognito: false,
+    };
+
+    // 2. Executor consumes capability and receives OTP code (never seed!)
+    let consume_resp = broker
+        .handle_executor_consume(ExecutorConsumeParams {
+            capability_token: token,
+            session_signature: "mock-sig".to_string(),
+            current_context: context,
+        })
+        .await
+        .expect("consume should succeed");
+
+    assert_eq!(consume_resp.fields.len(), 1);
+    assert_eq!(consume_resp.fields[0].role, "totp_code");
+    assert_eq!(consume_resp.fields[0].encrypted_value.len(), 6);
+    assert!(consume_resp.fields[0].encrypted_value.chars().all(|c| c.is_ascii_digit()));
+}
+
+#[tokio::test]
+async fn test_sensitive_form_fill_flow() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    let agent_id = AgentId::new();
+    let request_id = RequestId::new();
+
+    // 1. Agent requests form fill
+    let agent_req = ActionRequestParams {
+        request_id: request_id.clone(),
+        action: ActionKind::FormSensitiveFill,
+        identity: "account-recovery".to_string(),
+        target: TargetOriginConstraint {
+            origin: origin.clone(),
+            path_prefix: None,
+        },
+        browser_session_id: session_id.clone(),
+        tab_hint: Some(1),
+        reason: "Sensitive form fill".to_string(),
+        wait: true,
+        timeout_ms: 30000,
+        client_context: None,
+    };
+
+    let agent_resp = broker
+        .handle_action_request(agent_id, agent_req)
+        .await
+        .expect("form fill request should succeed");
+
+    assert_eq!(agent_resp.state, secretctl_domain::ActionRequestState::CapabilityIssued);
+
+    let token = {
+        let caps = broker.capabilities.lock().unwrap();
+        caps.values().next().unwrap().token.clone()
+    };
+
+    let context = ExecutorContextPayload {
+        browser_session_id: session_id.clone(),
+        tab_id: 1,
+        frame_id: 0,
+        document_id: "doc-1".to_string(),
+        navigation_epoch: 1,
+        top_origin: origin.clone(),
+        frame_origin: origin.clone(),
+        path_sha256: "path-hash".to_string(),
+        tls: true,
+        incognito: false,
+    };
+
+    // 2. Executor consumes capability
+    let consume_resp = broker
+        .handle_executor_consume(ExecutorConsumeParams {
+            capability_token: token,
+            session_signature: "mock-sig".to_string(),
+            current_context: context,
+        })
+        .await
+        .expect("consume should succeed");
+
+    assert_eq!(consume_resp.fields.len(), 1);
+    assert_eq!(consume_resp.fields[0].role, "sensitive_text");
+    assert_eq!(consume_resp.fields[0].encrypted_value, "REC-8842-9911-3320");
 }

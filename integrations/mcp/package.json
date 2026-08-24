@@ -1,0 +1,23 @@
+{
+  "name": "@secretctl/mcp-server",
+  "version": "0.1.0",
+  "description": "Model Context Protocol (MCP) server for secretctl credential isolation",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "secretctl-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@secretctl/sdk": "file:../../sdk/typescript"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.11.0"
+  },
+  "license": "Apache-2.0"
+}
