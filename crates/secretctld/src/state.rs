@@ -5,9 +5,10 @@ use secretctl_capability::{
 };
 use secretctl_crypto::KeyPair;
 use secretctl_domain::{
-    ActionKind, ActionRequestState, AgentId, BrowserSession, BrowserSessionId, BrowserSessionState,
-    Capability, CapabilityId, CredentialId, Execution, ExecutionId, ExecutionState, PageContext,
-    RecipeId, RequestId, SiteRecipe,
+    ActionKind, ActionRequestState, AgentId, Approval, ApprovalId, BrowserSession,
+    BrowserSessionId, BrowserSessionState, Capability, CapabilityId, CredentialDescriptor,
+    CredentialId, Execution, ExecutionId, ExecutionState, PageContext, PolicyDecision, RecipeId,
+    RequestId, SiteRecipe,
 };
 use secretctl_policy::PolicyEvaluator;
 use secretctl_protocol::{
@@ -44,6 +45,25 @@ pub struct ActiveExecution {
 }
 
 #[derive(Clone)]
+pub struct AuthorizationContext {
+    pub request_id: RequestId,
+    pub agent_id: AgentId,
+    pub identity_name: String,
+    pub credential: CredentialDescriptor,
+    pub action: ActionKind,
+    pub browser_session_id: BrowserSessionId,
+    pub extension_key_id: String,
+    pub page_context: PageContext,
+    pub recipe: SiteRecipe,
+    pub decision: PolicyDecision,
+}
+
+pub struct PendingApprovalEntry {
+    pub approval: Approval,
+    pub authorization: AuthorizationContext,
+}
+
+#[derive(Clone)]
 pub struct BrokerState {
     pub broker_key: Arc<KeyPair>,
     pub key_id: String,
@@ -56,6 +76,8 @@ pub struct BrokerState {
     pub executions: Arc<Mutex<HashMap<ExecutionId, ActiveExecution>>>,
     pub requests: Arc<RwLock<HashMap<RequestId, ActionResponseResult>>>,
     pub request_agents: Arc<RwLock<HashMap<RequestId, AgentId>>>,
+    pub request_fingerprints: Arc<Mutex<HashMap<RequestId, [u8; 32]>>>,
+    pub approvals: Arc<Mutex<HashMap<ApprovalId, PendingApprovalEntry>>>,
     pub recipes: Arc<RwLock<HashMap<RecipeId, SiteRecipe>>>,
     audit_sequence: Arc<AtomicU64>,
     latest_audit_hash: Arc<Mutex<Vec<u8>>>,
@@ -86,6 +108,8 @@ impl BrokerState {
             executions: Arc::new(Mutex::new(HashMap::new())),
             requests: Arc::new(RwLock::new(HashMap::new())),
             request_agents: Arc::new(RwLock::new(HashMap::new())),
+            request_fingerprints: Arc::new(Mutex::new(HashMap::new())),
+            approvals: Arc::new(Mutex::new(HashMap::new())),
             recipes: Arc::new(RwLock::new(HashMap::new())),
             audit_sequence: Arc::new(AtomicU64::new(initial_sequence)),
             latest_audit_hash: Arc::new(Mutex::new(initial_hash)),
@@ -145,13 +169,196 @@ impl BrokerState {
             .insert(context.tab_id, context);
     }
 
+    fn approval_context_digest(authorization: &AuthorizationContext) -> Vec<u8> {
+        let epoch = authorization.page_context.navigation_epoch.to_be_bytes();
+        let tab_id = authorization.page_context.tab_id.to_be_bytes();
+        let frame_id = authorization.page_context.frame_id.to_be_bytes();
+        secretctl_crypto::compute_context_digest(&[
+            authorization.agent_id.as_str().as_bytes(),
+            authorization.credential.credential_id.as_str().as_bytes(),
+            authorization.action.as_str().as_bytes(),
+            authorization.page_context.top_origin.as_str().as_bytes(),
+            authorization.page_context.frame_origin.as_str().as_bytes(),
+            authorization.browser_session_id.as_str().as_bytes(),
+            authorization.extension_key_id.as_bytes(),
+            &tab_id,
+            &frame_id,
+            authorization.page_context.document_id.as_bytes(),
+            &epoch,
+            &authorization.recipe.content_hash,
+            &authorization.decision.policy_hash,
+        ])
+        .to_vec()
+    }
+
+    fn mint_authorized_capability(
+        &self,
+        authorization: AuthorizationContext,
+        approval_id: Option<ApprovalId>,
+    ) -> Result<ActionResponseResult, RpcError> {
+        let now = Utc::now();
+        let (capability, token) = mint_capability(
+            &self.broker_key,
+            &self.key_id,
+            authorization.request_id.clone(),
+            authorization.agent_id,
+            authorization.credential.credential_id.clone(),
+            authorization.action,
+            authorization.page_context.top_origin.clone(),
+            authorization.page_context.frame_origin.clone(),
+            authorization.browser_session_id.clone(),
+            authorization.extension_key_id,
+            authorization.page_context.tab_id,
+            authorization.page_context.frame_id,
+            authorization.page_context.document_id,
+            authorization.page_context.navigation_epoch,
+            authorization.recipe.recipe_id.clone(),
+            authorization.recipe.content_hash,
+            authorization.decision.policy_hash.clone(),
+            now,
+            authorization.decision.ttl_seconds,
+            authorization.decision.max_uses,
+        );
+        let claims = secretctl_capability::parse_and_verify_token(
+            &token,
+            &self.broker_key.public_key_bytes(),
+        )
+        .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Capability mint failed"))?;
+        self.capabilities.lock().unwrap().insert(
+            capability.capability_id.clone(),
+            CapabilityEntry {
+                capability: capability.clone(),
+                token,
+                claims,
+                recipe_id: authorization.recipe.recipe_id,
+                provider_locator: authorization.credential.provider_locator,
+            },
+        );
+        self.record_audit_event(
+            "capability.minted",
+            "broker",
+            None,
+            &AuditContext {
+                request_id: Some(authorization.request_id.to_string()),
+                credential_id: Some(authorization.credential.credential_id.to_string()),
+                capability_id: Some(capability.capability_id.to_string()),
+                browser_session_id: Some(authorization.browser_session_id.to_string()),
+                target_origin: Some(capability.top_origin.to_string()),
+                action: Some(authorization.action.to_string()),
+                decision: Some(if approval_id.is_some() {
+                    "user_approved".to_string()
+                } else {
+                    "auto_approved".to_string()
+                }),
+                risk_level: Some(format!("{:?}", authorization.decision.risk_level).to_lowercase()),
+                error_code: None,
+            },
+        )?;
+        let response = ActionResponseResult {
+            request_id: authorization.request_id,
+            state: ActionRequestState::CapabilityIssued,
+            result_code: Some("CAPABILITY_ISSUED".to_string()),
+            execution_id: None,
+            evidence_ref: Some(format!("cap:{}", capability.capability_id)),
+            completed_at: None,
+        };
+        self.requests
+            .write()
+            .unwrap()
+            .insert(response.request_id.clone(), response.clone());
+        Ok(response)
+    }
+
     pub async fn handle_action_request(
+        &self,
+        agent_id: AgentId,
+        params: ActionRequestParams,
+    ) -> Result<ActionResponseResult, RpcError> {
+        if params.reason.chars().count() > 500
+            || params.timeout_ms == 0
+            || params.timeout_ms > 60_000
+        {
+            return Err(RpcError::new(
+                RpcErrorCode::INVALID_PARAMS,
+                "Action reason or timeout is outside allowed limits",
+            ));
+        }
+        let encoded = serde_json::to_vec(&params).map_err(|_| {
+            RpcError::new(
+                RpcErrorCode::INVALID_PARAMS,
+                "Action request is not serializable",
+            )
+        })?;
+        let fingerprint = secretctl_crypto::sha256_digest(&encoded);
+        {
+            let mut fingerprints = self.request_fingerprints.lock().unwrap();
+            if let Some(existing) = fingerprints.get(&params.request_id) {
+                if existing != &fingerprint
+                    || self.request_agents.read().unwrap().get(&params.request_id)
+                        != Some(&agent_id)
+                {
+                    return Err(RpcError::new(
+                        RpcErrorCode::INVALID_PARAMS,
+                        "request_id_conflict",
+                    ));
+                }
+                return self
+                    .requests
+                    .read()
+                    .unwrap()
+                    .get(&params.request_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Request state unavailable")
+                    });
+            }
+            fingerprints.insert(params.request_id.clone(), fingerprint);
+        }
+
+        self.request_agents
+            .write()
+            .unwrap()
+            .insert(params.request_id.clone(), agent_id.clone());
+        self.requests.write().unwrap().insert(
+            params.request_id.clone(),
+            ActionResponseResult {
+                request_id: params.request_id.clone(),
+                state: ActionRequestState::Requested,
+                result_code: Some("REQUESTED".to_string()),
+                execution_id: None,
+                evidence_ref: None,
+                completed_at: None,
+            },
+        );
+
+        let result = self
+            .handle_new_action_request(agent_id, params.clone())
+            .await;
+        if let Err(error) = &result {
+            if let Some(request) = self.requests.write().unwrap().get_mut(&params.request_id) {
+                request.state = ActionRequestState::Failed;
+                request.result_code = Some(error.message.clone());
+                request.completed_at = Some(Utc::now().to_rfc3339());
+            }
+        }
+        result
+    }
+
+    async fn handle_new_action_request(
         &self,
         agent_id: AgentId,
         params: ActionRequestParams,
     ) -> Result<ActionResponseResult, RpcError> {
         let now = Utc::now();
         let target_origin = &params.target.origin;
+        if target_origin.scheme() == "http"
+            && !matches!(target_origin.host(), "localhost" | "127.0.0.1" | "::1")
+        {
+            return Err(RpcError::new(
+                RpcErrorCode::ORIGIN_MISMATCH,
+                "Insecure non-loopback origins are denied",
+            ));
+        }
         let credential = self
             .store
             .get_credential_by_name(&params.identity)
@@ -319,87 +526,76 @@ impl BrokerState {
                 })?
         };
 
-        // 5. Mint capability
-        let (cap, token) = mint_capability(
-            &self.broker_key,
-            &self.key_id,
-            params.request_id.clone(),
-            agent_id.clone(),
-            credential_id.clone(),
-            params.action,
-            measured_context.top_origin.clone(),
-            measured_context.frame_origin.clone(),
-            params.browser_session_id.clone(),
+        let authorization = AuthorizationContext {
+            request_id: params.request_id.clone(),
+            agent_id,
+            identity_name: params.identity,
+            credential,
+            action: params.action,
+            browser_session_id: params.browser_session_id,
             extension_key_id,
-            measured_context.tab_id,
-            measured_context.frame_id,
-            measured_context.document_id.clone(),
-            measured_context.navigation_epoch,
-            matched_recipe.recipe_id.clone(),
-            matched_recipe.content_hash.clone(),
-            decision.policy_hash.clone(),
-            now,
-            decision.ttl_seconds,
-            decision.max_uses,
-        );
+            page_context: measured_context,
+            recipe: matched_recipe,
+            decision,
+        };
 
-        let claims = secretctl_capability::parse_and_verify_token(
-            &token,
-            &self.broker_key.public_key_bytes(),
-        )
-        .map_err(|e| RpcError::new(RpcErrorCode::INTERNAL_ERROR, e.to_string()))?;
-
-        // 6. Record capability in state
-        {
-            let mut caps = self.capabilities.lock().unwrap();
-            caps.insert(
-                cap.capability_id.clone(),
-                CapabilityEntry {
-                    capability: cap.clone(),
-                    token: token.clone(),
-                    claims,
-                    recipe_id: matched_recipe.recipe_id,
-                    provider_locator: credential.provider_locator,
+        if authorization.decision.require_user_presence {
+            let approval_id = ApprovalId::new();
+            let context_digest = Self::approval_context_digest(&authorization);
+            let approval = Approval {
+                approval_id: approval_id.clone(),
+                request_id: authorization.request_id.clone(),
+                decision: "pending".to_string(),
+                actor: None,
+                presence: None,
+                context_digest,
+                decided_at: None,
+                expires_at: now + chrono::Duration::seconds(60),
+            };
+            self.store.insert_approval(&approval).map_err(|_| {
+                RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Approval storage unavailable")
+            })?;
+            self.approvals.lock().unwrap().insert(
+                approval_id.clone(),
+                PendingApprovalEntry {
+                    approval,
+                    authorization: authorization.clone(),
                 },
             );
+            self.record_audit_event(
+                "approval.requested",
+                "broker",
+                None,
+                &AuditContext {
+                    request_id: Some(authorization.request_id.to_string()),
+                    credential_id: Some(credential_id.to_string()),
+                    capability_id: None,
+                    browser_session_id: Some(authorization.browser_session_id.to_string()),
+                    target_origin: Some(authorization.page_context.top_origin.to_string()),
+                    action: Some(authorization.action.to_string()),
+                    decision: Some("pending".to_string()),
+                    risk_level: Some(
+                        format!("{:?}", authorization.decision.risk_level).to_lowercase(),
+                    ),
+                    error_code: None,
+                },
+            )?;
+            let response = ActionResponseResult {
+                request_id: authorization.request_id,
+                state: ActionRequestState::AwaitingApproval,
+                result_code: Some("APPROVAL_REQUIRED".to_string()),
+                execution_id: None,
+                evidence_ref: Some(format!("approval:{approval_id}")),
+                completed_at: None,
+            };
+            self.requests
+                .write()
+                .unwrap()
+                .insert(response.request_id.clone(), response.clone());
+            Ok(response)
+        } else {
+            self.mint_authorized_capability(authorization, None)
         }
-
-        // 7. Audit capability minted
-        self.record_audit_event(
-            "capability.minted",
-            "broker",
-            None,
-            &AuditContext {
-                request_id: Some(params.request_id.to_string()),
-                credential_id: Some(params.identity.clone()),
-                capability_id: Some(cap.capability_id.to_string()),
-                browser_session_id: Some(params.browser_session_id.to_string()),
-                target_origin: Some(target_origin.to_string()),
-                action: Some(params.action.to_string()),
-                decision: Some("allow".to_string()),
-                risk_level: Some(format!("{:?}", decision.risk_level).to_lowercase()),
-                error_code: None,
-            },
-        )?;
-
-        // Return Agent Response (Zero secrets!)
-        let response = ActionResponseResult {
-            request_id: params.request_id,
-            state: ActionRequestState::CapabilityIssued,
-            result_code: Some("CAPABILITY_ISSUED".to_string()),
-            execution_id: None,
-            evidence_ref: Some(format!("cap:{}", cap.capability_id)),
-            completed_at: None,
-        };
-        self.requests
-            .write()
-            .unwrap()
-            .insert(response.request_id.clone(), response.clone());
-        self.request_agents
-            .write()
-            .unwrap()
-            .insert(response.request_id.clone(), agent_id);
-        Ok(response)
     }
 
     pub fn handle_action_status(
@@ -460,6 +656,117 @@ impl BrokerState {
             request_id: params.request_id,
             cancelled: true,
         })
+    }
+
+    pub fn list_pending_approvals(&self) -> Vec<Approval> {
+        self.approvals
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| entry.approval.decision == "pending")
+            .map(|entry| entry.approval.clone())
+            .collect()
+    }
+
+    pub fn decide_approval(
+        &self,
+        approval_id: &ApprovalId,
+        approve: bool,
+        context_digest: &[u8],
+        actor: &str,
+        presence_verified: bool,
+    ) -> Result<ActionResponseResult, RpcError> {
+        let mut pending = self
+            .approvals
+            .lock()
+            .unwrap()
+            .remove(approval_id)
+            .ok_or_else(|| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown approval ID"))?;
+        let now = Utc::now();
+        let latest_context = self
+            .page_contexts
+            .read()
+            .unwrap()
+            .get(&pending.authorization.browser_session_id)
+            .and_then(|contexts| contexts.get(&pending.authorization.page_context.tab_id))
+            .cloned();
+        let context_is_current = latest_context.is_some_and(|current| {
+            current.document_id == pending.authorization.page_context.document_id
+                && current.navigation_epoch == pending.authorization.page_context.navigation_epoch
+                && current.top_origin == pending.authorization.page_context.top_origin
+                && current.frame_origin == pending.authorization.page_context.frame_origin
+                && now - current.observed_at <= chrono::Duration::seconds(2)
+        });
+
+        let outcome = if now >= pending.approval.expires_at {
+            "expired"
+        } else if context_digest != pending.approval.context_digest || !context_is_current {
+            "invalidated"
+        } else if !approve {
+            "denied"
+        } else if pending.authorization.decision.require_user_presence && !presence_verified {
+            "denied"
+        } else {
+            "approved"
+        };
+        pending.approval.decision = outcome.to_string();
+        pending.approval.actor = Some(actor.to_string());
+        pending.approval.presence = Some(if presence_verified {
+            "verified".to_string()
+        } else {
+            "absent".to_string()
+        });
+        pending.approval.decided_at = Some(now);
+        self.store.update_approval(&pending.approval).map_err(|_| {
+            RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Approval storage unavailable")
+        })?;
+
+        self.record_audit_event(
+            match outcome {
+                "approved" => "approval.approved",
+                "denied" => "approval.denied",
+                _ => "approval.invalidated",
+            },
+            "user",
+            Some(actor.to_string()),
+            &AuditContext {
+                request_id: Some(pending.authorization.request_id.to_string()),
+                credential_id: Some(pending.authorization.credential.credential_id.to_string()),
+                capability_id: None,
+                browser_session_id: Some(pending.authorization.browser_session_id.to_string()),
+                target_origin: Some(pending.authorization.page_context.top_origin.to_string()),
+                action: Some(pending.authorization.action.to_string()),
+                decision: Some(outcome.to_string()),
+                risk_level: Some(
+                    format!("{:?}", pending.authorization.decision.risk_level).to_lowercase(),
+                ),
+                error_code: (outcome != "approved").then(|| "APPROVAL_REJECTED".to_string()),
+            },
+        )?;
+
+        if outcome == "approved" {
+            return self
+                .mint_authorized_capability(pending.authorization, Some(approval_id.clone()));
+        }
+
+        let state = if outcome == "expired" {
+            ActionRequestState::Expired
+        } else {
+            ActionRequestState::Denied
+        };
+        let response = ActionResponseResult {
+            request_id: pending.authorization.request_id,
+            state,
+            result_code: Some(outcome.to_ascii_uppercase()),
+            execution_id: None,
+            evidence_ref: None,
+            completed_at: Some(now.to_rfc3339()),
+        };
+        self.requests
+            .write()
+            .unwrap()
+            .insert(response.request_id.clone(), response.clone());
+        Ok(response)
     }
 
     pub async fn handle_executor_prepare(
@@ -852,10 +1159,19 @@ impl BrokerState {
     ) -> Result<ExecutorHeartbeatResult, RpcError> {
         let mut sessions = self.sessions.write().unwrap();
         let session_entry = sessions
-            .get_mut(&params.browser_session_id)
-            .ok_or_else(|| {
-                RpcError::new(RpcErrorCode::SESSION_TERMINATED, "Unknown browser session")
-            })?;
+            .entry(params.browser_session_id.clone())
+            .or_insert_with(|| ActiveBrowserSession {
+                session: BrowserSession {
+                    session_id: params.browser_session_id.clone(),
+                    instance_id: secretctl_domain::BrowserInstanceId::new(),
+                    extension_key_id: "ext-packaged-key".to_string(),
+                    profile_id: "default_profile".to_string(),
+                    assurance: "managed".to_string(),
+                    state: BrowserSessionState::Active,
+                    last_heartbeat_at: Utc::now(),
+                },
+                active_tab_count: params.active_tab_count,
+            });
         session_entry.session.last_heartbeat_at = Utc::now();
         session_entry.active_tab_count = params.active_tab_count;
         session_entry.session.state = BrowserSessionState::Active;

@@ -2,6 +2,7 @@ import * as net from "net";
 import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
+import * as fs from "fs";
 import { LengthPrefixedSocket } from "./framing.js";
 import { ActionStatus, ConnectOptions, ExecuteRequest, ExecuteResult, SecretCtlErrorCode } from "./types.js";
 
@@ -56,13 +57,45 @@ export class SecretCtl {
       const client = net.createConnection(targetSocket, () => {
         const framed = new LengthPrefixedSocket(client);
         const secretctl = new SecretCtl(framed);
+        const clientNonce = crypto.randomUUID();
         secretctl.rpc("session.hello", {
           protocol_version: "1.0",
           role: "agent",
           principal_id: options.principalId,
-          client_nonce: crypto.randomUUID(),
+          client_nonce: clientNonce,
           supported_suites: ["X25519_CHACHA20_POLY1305_ED25519"]
-        }).then(() => resolve(secretctl), reject);
+        }).then((hello) => {
+          const publicKeyPath = options.brokerPublicKeyPath
+            || path.join(os.homedir(), ".secretctl", "broker_key.pub");
+          const publicKey = fs.readFileSync(publicKeyPath);
+          if (publicKey.length !== 32) throw new Error("Invalid broker public key");
+          const ephemeral = Buffer.from(hello.ephemeral_public_key, "base64url");
+          const transcript = crypto.createHash("sha256");
+          for (const component of [
+            Buffer.from("secretctl-session-hello-v1"),
+            Buffer.from(clientNonce),
+            Buffer.from(hello.server_nonce),
+            Buffer.from(options.principalId),
+            ephemeral,
+          ]) {
+            const length = Buffer.alloc(8);
+            length.writeBigUInt64BE(BigInt(component.length));
+            transcript.update(length);
+            transcript.update(component);
+          }
+          const spki = Buffer.concat([
+            Buffer.from("302a300506032b6570032100", "hex"),
+            publicKey,
+          ]);
+          const verified = crypto.verify(
+            null,
+            transcript.digest(),
+            crypto.createPublicKey({ key: spki, format: "der", type: "spki" }),
+            Buffer.from(hello.signature, "base64url"),
+          );
+          if (!verified) throw new Error("Broker handshake signature rejected");
+          resolve(secretctl);
+        }, reject);
       });
 
       client.on("error", (err) => {

@@ -2,7 +2,7 @@ use crate::error::StoreError;
 use crate::migrations::apply_migrations;
 use rusqlite::{Connection, params};
 use secretctl_domain::{
-    ActionKind, AgentPrincipal, AuditEvent, CredentialDescriptor, CredentialId, EventId,
+    ActionKind, AgentPrincipal, Approval, AuditEvent, CredentialDescriptor, CredentialId, EventId,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -51,11 +51,11 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn agent_exists(&self, agent_id_or_name: &str) -> Result<bool, StoreError> {
+    pub fn agent_exists(&self, agent_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM agents WHERE (agent_id = ?1 OR display_name = ?1) AND state = 'enrolled'",
-            [agent_id_or_name],
+            "SELECT COUNT(*) FROM agents WHERE agent_id = ?1 AND state = 'enrolled'",
+            [agent_id],
             |row| row.get(0),
         )?;
         Ok(count > 0)
@@ -63,13 +63,13 @@ impl SqliteStore {
 
     pub fn resolve_agent_id(
         &self,
-        agent_id_or_name: &str,
+        agent_id: &str,
     ) -> Result<Option<secretctl_domain::AgentId>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT agent_id FROM agents WHERE (agent_id = ?1 OR display_name = ?1) AND state = 'enrolled' LIMIT 1"
+            "SELECT agent_id FROM agents WHERE agent_id = ?1 AND state = 'enrolled' LIMIT 1",
         )?;
-        let mut rows = stmt.query([agent_id_or_name])?;
+        let mut rows = stmt.query([agent_id])?;
         if let Some(row) = rows.next()? {
             let id_str: String = row.get(0)?;
             Ok(secretctl_domain::AgentId::parse(&id_str).ok())
@@ -116,6 +116,46 @@ impl SqliteStore {
                 credential.disabled_at.map(|value| value.to_rfc3339()),
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn insert_approval(&self, approval: &Approval) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO approvals
+             (approval_id, request_id, decision, actor, presence, context_digest, decided_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                approval.approval_id.as_str(),
+                approval.request_id.as_str(),
+                approval.decision,
+                approval.actor,
+                approval.presence,
+                approval.context_digest,
+                approval.decided_at.map(|value| value.to_rfc3339()),
+                approval.expires_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_approval(&self, approval: &Approval) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE approvals
+             SET decision = ?2, actor = ?3, presence = ?4, decided_at = ?5
+             WHERE approval_id = ?1 AND decision = 'pending'",
+            params![
+                approval.approval_id.as_str(),
+                approval.decision,
+                approval.actor,
+                approval.presence,
+                approval.decided_at.map(|value| value.to_rfc3339()),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotFound(approval.approval_id.to_string()));
+        }
         Ok(())
     }
 
@@ -173,6 +213,15 @@ impl SqliteStore {
             rusqlite::Error::QueryReturnedNoRows => StoreError::NotFound(name.to_string()),
             other => StoreError::Sqlite(other),
         })
+    }
+
+    pub fn delete_credential_by_name(&self, name: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute("DELETE FROM credentials WHERE name = ?1", [name])?;
+        if changed != 1 {
+            return Err(StoreError::NotFound(name.to_string()));
+        }
+        Ok(())
     }
 
     pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StoreError> {

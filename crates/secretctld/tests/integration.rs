@@ -331,9 +331,9 @@ async fn test_concurrent_consume_race_condition() {
         incognito: false,
     };
 
-    // 2. Launch 10 concurrent consume attempts
+    // 2. Launch 100 concurrent consume attempts (AT-06)
     let mut handles = Vec::new();
-    for _ in 0..10 {
+    for _ in 0..100 {
         let b = broker.clone();
         let t = token.clone();
         let ctx = context.clone();
@@ -363,9 +363,9 @@ async fn test_concurrent_consume_race_condition() {
         }
     }
 
-    // Atomic invariant: exactly 1 winner, 9 rejected
+    // Atomic invariant: exactly 1 winner, 99 rejected
     assert_eq!(success_count, 1);
-    assert_eq!(failure_count, 9);
+    assert_eq!(failure_count, 99);
 }
 
 #[tokio::test]
@@ -640,4 +640,110 @@ async fn test_policy_reload_revokes_old_policy_capabilities() {
         entry.capability.state == secretctl_domain::CapabilityState::Revoked
             && entry.capability.revoked_reason.as_deref() == Some("policy_changed")
     }));
+}
+
+#[tokio::test]
+async fn test_required_approval_denial_never_mints_capability() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker
+        .replace_policy(PolicyEvaluator::new(PolicyDocument {
+            version: "approval-required".to_string(),
+            rules: vec![PolicyRule {
+                id: secretctl_domain::RuleId::parse("rule_presence").unwrap(),
+                description: None,
+                effect: secretctl_domain::PolicyEffect::Allow,
+                principals: vec!["*".to_string()],
+                credentials: vec!["github-work".to_string()],
+                actions: vec![ActionKind::AuthenticatePassword],
+                destinations: vec![DestinationRule {
+                    origin: origin.clone(),
+                    path_prefix: Some("/login".to_string()),
+                }],
+                conditions: RuleConditions {
+                    browser_assurance: Some("managed".to_string()),
+                    require_user_presence: true,
+                    max_uses: 1,
+                    max_ttl_seconds: 30,
+                },
+            }],
+        }))
+        .unwrap();
+    let response = broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin,
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id,
+                tab_hint: Some(1),
+                reason: "approval denial".to_string(),
+                wait: false,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.state,
+        secretctl_domain::ActionRequestState::AwaitingApproval
+    );
+
+    let approval = broker.list_pending_approvals().pop().unwrap();
+    let denied = broker
+        .decide_approval(
+            &approval.approval_id,
+            false,
+            &approval.context_digest,
+            "test-user",
+            true,
+        )
+        .unwrap();
+    assert_eq!(denied.state, secretctl_domain::ActionRequestState::Denied);
+    assert!(broker.capabilities.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_request_id_is_idempotent_and_conflicts_fail_closed() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    let agent_id = AgentId::new();
+    let request_id = RequestId::new();
+    let params = ActionRequestParams {
+        request_id: request_id.clone(),
+        action: ActionKind::AuthenticatePassword,
+        identity: "github-work".to_string(),
+        target: TargetOriginConstraint {
+            origin,
+            path_prefix: Some("/login".to_string()),
+        },
+        browser_session_id: session_id,
+        tab_hint: Some(1),
+        reason: "idempotency".to_string(),
+        wait: false,
+        timeout_ms: 30_000,
+        client_context: None,
+    };
+    let first = broker
+        .handle_action_request(agent_id.clone(), params.clone())
+        .await
+        .unwrap();
+    let second = broker
+        .handle_action_request(agent_id.clone(), params.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.evidence_ref, second.evidence_ref);
+    assert_eq!(broker.capabilities.lock().unwrap().len(), 1);
+
+    let mut conflicting = params;
+    conflicting.reason = "changed".to_string();
+    let error = broker
+        .handle_action_request(agent_id, conflicting)
+        .await
+        .unwrap_err();
+    assert_eq!(error.message, "request_id_conflict");
 }

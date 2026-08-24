@@ -27,6 +27,7 @@ export type SecretCtlErrorCode =
 export interface ConnectOptions {
   principalId: string;
   socketPath?: string;
+  brokerPublicKeyPath?: string;
 }
 
 export interface ActionStatus {

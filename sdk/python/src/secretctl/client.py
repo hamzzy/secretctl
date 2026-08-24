@@ -1,12 +1,16 @@
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import threading
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from .framing import AsyncLengthPrefixedSocket
 from .types import ActionStatus, ExecuteRequest, ExecuteResult
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 PROHIBITED_RESPONSE_KEYS = (
     "password",
@@ -40,7 +44,10 @@ class AsyncSecretCtl:
 
     @classmethod
     async def connect(
-        cls, principal_id: str, socket_path: Optional[str] = None
+        cls,
+        principal_id: str,
+        socket_path: Optional[str] = None,
+        broker_public_key_path: Optional[str] = None,
     ) -> "AsyncSecretCtl":
         if socket_path is None:
             socket_path = os.path.join(
@@ -48,15 +55,43 @@ class AsyncSecretCtl:
             )
         reader, writer = await asyncio.open_unix_connection(socket_path)
         client = cls(AsyncLengthPrefixedSocket(reader, writer))
-        await client._rpc(
+        client_nonce = str(uuid.uuid4())
+        hello = await client._rpc(
             "session.hello",
             {
                 "protocol_version": "1.0",
                 "role": "agent",
                 "principal_id": principal_id,
-                "client_nonce": str(uuid.uuid4()),
+                "client_nonce": client_nonce,
                 "supported_suites": ["X25519_CHACHA20_POLY1305_ED25519"],
             },
+        )
+        if not isinstance(hello, dict):
+            raise ValueError("Invalid broker handshake")
+        key_path = Path(
+            broker_public_key_path
+            or os.path.join(os.path.expanduser("~"), ".secretctl", "broker_key.pub")
+        )
+        public_key = key_path.read_bytes()
+        if len(public_key) != 32:
+            raise ValueError("Invalid broker public key")
+
+        def decode_base64url(value: str) -> bytes:
+            return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+        components = [
+            b"secretctl-session-hello-v1",
+            client_nonce.encode(),
+            str(hello["server_nonce"]).encode(),
+            principal_id.encode(),
+            decode_base64url(str(hello["ephemeral_public_key"])),
+        ]
+        digest = hashlib.sha256()
+        for component in components:
+            digest.update(len(component).to_bytes(8, "big"))
+            digest.update(component)
+        Ed25519PublicKey.from_public_bytes(public_key).verify(
+            decode_base64url(str(hello["signature"])), digest.digest()
         )
         return client
 
@@ -149,7 +184,12 @@ class SecretCtl:
         self._client = client
 
     @classmethod
-    def connect(cls, principal_id: str, socket_path: Optional[str] = None) -> "SecretCtl":
+    def connect(
+        cls,
+        principal_id: str,
+        socket_path: Optional[str] = None,
+        broker_public_key_path: Optional[str] = None,
+    ) -> "SecretCtl":
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -171,7 +211,7 @@ class SecretCtl:
         thread.start()
         ready.wait()
         future = asyncio.run_coroutine_threadsafe(
-            AsyncSecretCtl.connect(principal_id, socket_path), loop
+            AsyncSecretCtl.connect(principal_id, socket_path, broker_public_key_path), loop
         )
         return cls(loop, thread, future.result())
 

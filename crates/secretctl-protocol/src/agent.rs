@@ -4,6 +4,7 @@ use secretctl_domain::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TargetOriginConstraint {
     pub origin: CanonicalOrigin,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -11,6 +12,7 @@ pub struct TargetOriginConstraint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRequestParams {
     pub request_id: RequestId,
     pub action: ActionKind,
@@ -51,6 +53,7 @@ pub struct ActionResponseResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionStatusParams {
     pub request_id: RequestId,
 }
@@ -64,6 +67,7 @@ pub struct ActionStatusResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionCancelParams {
     pub request_id: RequestId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +81,7 @@ pub struct ActionCancelResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserRequestSessionParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -94,6 +99,7 @@ pub struct BrowserRequestSessionResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionHelloParams {
     pub protocol_version: String,
     pub role: String,

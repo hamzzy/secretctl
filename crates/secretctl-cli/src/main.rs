@@ -53,9 +53,13 @@ enum Commands {
         cmd: AuditCommands,
     },
     /// Show daemon status
-    Status,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// Show health and diagnostic checks
-    Health,
+    #[command(alias = "health")]
+    Doctor,
 }
 
 #[derive(Subcommand, Debug)]
@@ -75,12 +79,10 @@ enum CredentialCommands {
     Add {
         #[arg(long)]
         name: String,
-        #[arg(long, default_value = "password")]
-        r#type: CredentialType,
-        #[arg(long, default_value = "https://github.com:443")]
-        origin: String,
         #[arg(long)]
-        stdin: bool,
+        r#type: CredentialType,
+        #[arg(long)]
+        origin: String,
     },
     /// Check if a credential exists in the keychain
     Check {
@@ -212,24 +214,16 @@ async fn main() -> anyhow::Result<()> {
                     name,
                     r#type,
                     origin,
-                    stdin,
                 } => {
                     let origin = CanonicalOrigin::parse(&origin)?;
                     let credential_id = CredentialId::new();
-                    let provider_locator = name.clone();
-                    let secret_val = if stdin {
-                        use std::io::Read;
-                        let mut buf = String::new();
-                        std::io::stdin().read_to_string(&mut buf)?;
-                        zeroize::Zeroizing::new(buf.trim_end().to_string())
-                    } else {
-                        zeroize::Zeroizing::new(
-                            tokio::task::spawn_blocking(|| {
-                                rpassword::prompt_password("Secret value: ")
-                            })
-                            .await??,
-                        )
-                    };
+                    let provider_locator = credential_id.to_string();
+                    let secret_val = zeroize::Zeroizing::new(
+                        tokio::task::spawn_blocking(|| {
+                            rpassword::prompt_password("Secret value: ")
+                        })
+                        .await??,
+                    );
                     provider
                         .store_secret(&provider_locator, secret_val.as_bytes())
                         .await?;
@@ -256,7 +250,8 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
                 CredentialCommands::Check { name } => {
-                    let exists = provider.exists(&name).await?;
+                    let descriptor = store.get_credential_by_name(&name)?;
+                    let exists = provider.exists(&descriptor.provider_locator).await?;
                     if exists {
                         println!("Credential '{}' exists in Keychain", name);
                     } else {
@@ -264,7 +259,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 CredentialCommands::Delete { name } => {
-                    provider.delete_secret(&name).await?;
+                    let descriptor = store.get_credential_by_name(&name)?;
+                    provider.delete_secret(&descriptor.provider_locator).await?;
+                    store.delete_credential_by_name(&name)?;
                     println!("Successfully deleted credential '{}' from Keychain", name);
                 }
             }
@@ -305,11 +302,53 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
-        Commands::Status => {
-            println!("secretctl daemon status: operational");
+        Commands::Status { json } => {
+            let socket_path = secretctl_dir.join("run/admin.sock");
+            let running = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                tokio::net::UnixStream::connect(&socket_path),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": if running { "running" } else { "unavailable" },
+                        "admin_socket": socket_path,
+                    })
+                );
+            } else if running {
+                println!("secretctl daemon is running");
+            } else {
+                anyhow::bail!("secretctl daemon is unavailable");
+            }
         }
-        Commands::Health => {
-            println!("All security invariants verified: OK");
+        Commands::Doctor => {
+            let db_path = secretctl_dir.join("secretctl.db");
+            anyhow::ensure!(
+                db_path.exists(),
+                "metadata database is missing; run `secretctl init`"
+            );
+            let store = SqliteStore::open(&db_path)?;
+            verify_audit_chain(&store.list_audit_events()?)?;
+            let provider = MacOsKeychainProvider::new();
+            anyhow::ensure!(
+                provider.exists("installation-signing-key").await?,
+                "installation signing key is unavailable"
+            );
+            println!("database: ok");
+            println!("audit chain: ok");
+            println!("macOS keychain: ok");
+            let admin_socket = secretctl_dir.join("run/admin.sock");
+            println!(
+                "daemon: {}",
+                if admin_socket.exists() {
+                    "socket present"
+                } else {
+                    "not running"
+                }
+            );
         }
     }
 

@@ -6,7 +6,6 @@ use secretctl_store::SqliteStore;
 use secretctld::{BrokerServer, BrokerState};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -58,11 +57,91 @@ async fn main() -> anyhow::Result<()> {
 
     let default_policy = PolicyDocument {
         version: "1.0".to_string(),
-        rules: vec![],
+        rules: vec![secretctl_policy::PolicyRule {
+            id: secretctl_domain::RuleId::parse("rule_default_dev").unwrap(),
+            description: Some("Default local development policy".to_string()),
+            effect: secretctl_domain::PolicyEffect::Allow,
+            principals: vec!["*".to_string()],
+            credentials: vec!["*".to_string()],
+            actions: vec![
+                secretctl_domain::ActionKind::AuthenticatePassword,
+                secretctl_domain::ActionKind::AuthenticateTotp,
+                secretctl_domain::ActionKind::FormSensitiveFill,
+            ],
+            destinations: vec![
+                secretctl_policy::DestinationRule {
+                    origin: secretctl_domain::CanonicalOrigin::parse("https://github.com:443")
+                        .unwrap(),
+                    path_prefix: None,
+                },
+                secretctl_policy::DestinationRule {
+                    origin: secretctl_domain::CanonicalOrigin::parse("https://localhost:443")
+                        .unwrap(),
+                    path_prefix: None,
+                },
+            ],
+            conditions: secretctl_policy::RuleConditions {
+                browser_assurance: Some("managed".to_string()),
+                require_user_presence: false,
+                max_uses: 1,
+                max_ttl_seconds: 60,
+            },
+        }],
     };
     let evaluator = PolicyEvaluator::new(default_policy);
 
     let state = BrokerState::new(broker_key, "broker-key-default", store, provider, evaluator);
+
+    // Register default GitHub login and TOTP recipe
+    let github_origin = secretctl_domain::CanonicalOrigin::parse("https://github.com:443").unwrap();
+    state.register_recipe(secretctl_domain::SiteRecipe {
+        recipe_id: secretctl_domain::RecipeId::parse("rcp_github_totp").unwrap(),
+        version: 1,
+        name: "GitHub TOTP".to_string(),
+        action: secretctl_domain::ActionKind::AuthenticateTotp,
+        top_origin: github_origin.clone(),
+        path_prefix: None,
+        frame_origin: Some(github_origin.clone()),
+        fields: vec![secretctl_domain::RecipeField {
+            role: "totp_code".to_string(),
+            selector: "input[autocomplete='one-time-code'], input[name='otp'], input[type='tel']"
+                .to_string(),
+            optional: false,
+            clear_first: true,
+        }],
+        submit: Some(secretctl_domain::RecipeSubmit {
+            selector: Some("button[type='submit']".to_string()),
+            auto_submit: true,
+            delay_ms: None,
+        }),
+        success_indicators: None,
+        content_hash: vec![],
+        enabled: true,
+    });
+    state.register_recipe(secretctl_domain::SiteRecipe {
+        recipe_id: secretctl_domain::RecipeId::parse("rcp_github_password").unwrap(),
+        version: 1,
+        name: "GitHub Password".to_string(),
+        action: secretctl_domain::ActionKind::AuthenticatePassword,
+        top_origin: github_origin.clone(),
+        path_prefix: None,
+        frame_origin: Some(github_origin),
+        fields: vec![secretctl_domain::RecipeField {
+            role: "password".to_string(),
+            selector: "input[type='password']".to_string(),
+            optional: false,
+            clear_first: true,
+        }],
+        submit: Some(secretctl_domain::RecipeSubmit {
+            selector: Some("button[type='submit']".to_string()),
+            auto_submit: true,
+            delay_ms: None,
+        }),
+        success_indicators: None,
+        content_hash: vec![],
+        enabled: true,
+    });
+
     let runtime_dir = secretctl_dir.join("run");
     let server = BrokerServer::new(state, runtime_dir.clone());
 

@@ -2,6 +2,7 @@ use secretctl_domain::{BrowserSessionId, CanonicalOrigin, ExecutionId, RecipeId}
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutorContextPayload {
     pub browser_session_id: BrowserSessionId,
     pub tab_id: u32,
@@ -17,6 +18,7 @@ pub struct ExecutorContextPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutorPrepareParams {
     pub context: ExecutorContextPayload,
 }
@@ -29,6 +31,7 @@ pub struct ExecutorPrepareResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutorConsumeParams {
     pub capability_token: String,
     pub session_signature: String,
@@ -63,6 +66,7 @@ pub struct ExecutionEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutorResultParams {
     pub execution_id: ExecutionId,
     pub status: String,
@@ -77,6 +81,7 @@ pub struct ExecutorResultResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutorHeartbeatParams {
     pub browser_session_id: BrowserSessionId,
     pub active_tab_count: u32,

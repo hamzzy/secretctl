@@ -4,16 +4,23 @@ use async_trait::async_trait;
 use secretctl_crypto::SecretBytes;
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct MemorySecretProvider {
     store: RwLock<HashMap<String, Vec<u8>>>,
+    retrieval_count: AtomicU64,
 }
 
 impl MemorySecretProvider {
     pub fn new() -> Self {
         Self {
             store: RwLock::new(HashMap::new()),
+            retrieval_count: AtomicU64::new(0),
         }
+    }
+
+    pub fn retrieval_count(&self) -> u64 {
+        self.retrieval_count.load(Ordering::SeqCst)
     }
 }
 
@@ -38,6 +45,7 @@ impl SecretProvider for MemorySecretProvider {
             .get(locator)
             .cloned()
             .ok_or_else(|| ProviderError::NotFound(locator.to_string()))?;
+        self.retrieval_count.fetch_add(1, Ordering::SeqCst);
         Ok(SecretBytes::new(bytes))
     }
 

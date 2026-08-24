@@ -1,7 +1,7 @@
 use crate::state::BrokerState;
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use secretctl_domain::AgentId;
+use secretctl_domain::{AgentId, ApprovalId};
 use secretctl_protocol::{
     ActionCancelParams, ActionRequestParams, ActionStatusParams, ExecutorConsumeParams,
     ExecutorHeartbeatParams, ExecutorPrepareParams, ExecutorResultParams, LengthPrefixedCodec,
@@ -11,6 +11,16 @@ use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalDecideParams {
+    approval_id: ApprovalId,
+    decision: String,
+    context_digest: Vec<u8>,
+    #[serde(default)]
+    presence_verified: bool,
+}
 
 pub struct BrokerServer {
     state: BrokerState,
@@ -158,13 +168,24 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
                     )
                 } else {
                     authenticated_agent = resolved_agent;
+                    let server_nonce = uuid::Uuid::new_v4().to_string();
+                    let ephemeral_key = secretctl_crypto::StaticX25519::generate();
+                    let ephemeral_public_key = ephemeral_key.public_bytes();
+                    let transcript = secretctl_crypto::compute_context_digest(&[
+                        b"secretctl-session-hello-v1",
+                        params.client_nonce.as_bytes(),
+                        server_nonce.as_bytes(),
+                        params.principal_id.as_bytes(),
+                        &ephemeral_public_key,
+                    ]);
                     let res = SessionHelloResult {
                         protocol_version: "1.0".to_string(),
-                        server_nonce: uuid::Uuid::new_v4().to_string(),
+                        server_nonce,
                         ephemeral_public_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
-                            .encode(state.broker_key.public_key_bytes()),
+                            .encode(ephemeral_public_key),
                         server_key_id: state.key_id.clone(),
-                        signature: "mock_handshake_sig".to_string(),
+                        signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode(state.broker_key.sign(&transcript)),
                     };
                     RpcResponse::success(id, serde_json::to_value(res)?)
                 }
@@ -283,7 +304,7 @@ async fn handle_executor_connection(stream: UnixStream, state: BrokerState) -> a
     Ok(())
 }
 
-async fn handle_admin_connection(stream: UnixStream, _state: BrokerState) -> anyhow::Result<()> {
+async fn handle_admin_connection(stream: UnixStream, state: BrokerState) -> anyhow::Result<()> {
     let mut framed = Framed::new(stream, LengthPrefixedCodec::for_agent());
 
     while let Some(msg_res) = framed.next().await {
@@ -293,6 +314,23 @@ async fn handle_admin_connection(stream: UnixStream, _state: BrokerState) -> any
 
         let response: RpcResponse<serde_json::Value> = match rpc_req.method.as_str() {
             "admin.ping" => RpcResponse::success(id, serde_json::json!({"status": "ok"})),
+            "approval.list" => {
+                RpcResponse::success(id, serde_json::to_value(state.list_pending_approvals())?)
+            }
+            "approval.decide" => {
+                let params: ApprovalDecideParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.decide_approval(
+                    &params.approval_id,
+                    params.decision == "approve",
+                    &params.context_digest,
+                    "local-admin",
+                    params.presence_verified,
+                ) {
+                    Ok(result) => RpcResponse::success(id, serde_json::to_value(result)?),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
             _ => RpcResponse::error(
                 id,
                 RpcError::new(RpcErrorCode::METHOD_NOT_FOUND, "Method not found"),

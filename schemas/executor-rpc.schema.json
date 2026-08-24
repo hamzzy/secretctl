@@ -11,6 +11,23 @@
     { "$ref": "#/$defs/ExecutorHeartbeat" }
   ],
   "$defs": {
+    "ExecutorContext": {
+      "type": "object",
+      "properties": {
+        "browser_session_id": { "type": "string" },
+        "tab_id": { "type": "integer" },
+        "frame_id": { "type": "integer" },
+        "document_id": { "type": "string" },
+        "navigation_epoch": { "type": "integer" },
+        "top_origin": { "type": "string" },
+        "frame_origin": { "type": "string" },
+        "path_sha256": { "type": "string" },
+        "tls": { "type": "boolean" },
+        "incognito": { "type": "boolean" }
+      },
+      "required": ["browser_session_id", "tab_id", "frame_id", "document_id", "navigation_epoch", "top_origin", "frame_origin", "path_sha256", "tls"],
+      "additionalProperties": false
+    },
     "ExecutorPrepare": {
       "type": "object",
       "properties": {
@@ -20,28 +37,9 @@
         "params": {
           "type": "object",
           "properties": {
-            "browser_session_id": { "type": "string" },
-            "tab_id": { "type": "integer" },
-            "frame_id": { "type": "integer" },
-            "document_id": { "type": "string" },
-            "navigation_epoch": { "type": "integer" },
-            "top_origin": { "type": "string" },
-            "frame_origin": { "type": "string" },
-            "path_sha256": { "type": "string" },
-            "tls": { "type": "boolean" },
-            "incognito": { "type": "boolean" }
+            "context": { "$ref": "#/$defs/ExecutorContext" }
           },
-          "required": [
-            "browser_session_id",
-            "tab_id",
-            "frame_id",
-            "document_id",
-            "navigation_epoch",
-            "top_origin",
-            "frame_origin",
-            "path_sha256",
-            "tls"
-          ],
+          "required": ["context"],
           "additionalProperties": false
         }
       },
@@ -59,22 +57,7 @@
           "properties": {
             "capability_token": { "type": "string" },
             "session_signature": { "type": "string" },
-            "current_context": {
-              "type": "object",
-              "properties": {
-                "browser_session_id": { "type": "string" },
-                "tab_id": { "type": "integer" },
-                "frame_id": { "type": "integer" },
-                "document_id": { "type": "string" },
-                "navigation_epoch": { "type": "integer" },
-                "top_origin": { "type": "string" },
-                "frame_origin": { "type": "string" },
-                "path_sha256": { "type": "string" },
-                "tls": { "type": "boolean" }
-              },
-              "required": ["browser_session_id", "tab_id", "frame_id", "document_id", "navigation_epoch", "top_origin", "frame_origin", "tls"],
-              "additionalProperties": false
-            }
+            "current_context": { "$ref": "#/$defs/ExecutorContext" }
           },
           "required": ["capability_token", "session_signature", "current_context"],
           "additionalProperties": false
