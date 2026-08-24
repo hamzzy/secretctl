@@ -2,7 +2,7 @@ use chrono::Utc;
 use secretctl_crypto::KeyPair;
 use secretctl_domain::{
     ActionKind, AgentId, BrowserSession, BrowserSessionId, BrowserSessionState, CanonicalOrigin,
-    RecipeField, RecipeId, RequestId, SiteRecipe,
+    CredentialDescriptor, CredentialId, PageContext, RecipeField, RecipeId, RequestId, SiteRecipe,
 };
 use secretctl_policy::{
     DestinationRule, PolicyDocument, PolicyEvaluator, PolicyRule, RuleConditions,
@@ -32,6 +32,25 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         .store_secret("account-recovery", b"REC-8842-9911-3320")
         .await
         .expect("stored recovery code");
+
+    for (name, kind, action) in [
+        ("github-work", "password", ActionKind::AuthenticatePassword),
+        ("github-totp", "totp", ActionKind::AuthenticateTotp),
+        ("account-recovery", "sensitive_form", ActionKind::FormSensitiveFill),
+    ] {
+        store
+            .insert_credential(&CredentialDescriptor {
+                credential_id: CredentialId::new(),
+                name: name.to_string(),
+                kind: kind.to_string(),
+                provider: "memory".to_string(),
+                provider_locator: name.to_string(),
+                allowed_actions: vec![action],
+                metadata_json: "{}".to_string(),
+                disabled_at: None,
+            })
+            .expect("stored credential metadata");
+    }
 
     let origin = CanonicalOrigin::parse("https://github.com:443").expect("valid origin");
 
@@ -87,6 +106,44 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         enabled: true,
     };
     state.register_recipe(recipe);
+    state.register_recipe(SiteRecipe {
+        recipe_id: RecipeId::parse("rcp_github_totp").unwrap(),
+        version: 1,
+        name: "GitHub TOTP".to_string(),
+        action: ActionKind::AuthenticateTotp,
+        top_origin: origin.clone(),
+        path_prefix: None,
+        frame_origin: Some(origin.clone()),
+        fields: vec![RecipeField {
+            role: "totp_code".to_string(),
+            selector: "input[name='otp']".to_string(),
+            optional: false,
+            clear_first: true,
+        }],
+        submit: None,
+        success_indicators: None,
+        content_hash: vec![4, 5, 6],
+        enabled: true,
+    });
+    state.register_recipe(SiteRecipe {
+        recipe_id: RecipeId::parse("rcp_account_recovery").unwrap(),
+        version: 1,
+        name: "Account recovery".to_string(),
+        action: ActionKind::FormSensitiveFill,
+        top_origin: origin.clone(),
+        path_prefix: None,
+        frame_origin: Some(origin.clone()),
+        fields: vec![RecipeField {
+            role: "recovery_code".to_string(),
+            selector: "input[name='recovery_code']".to_string(),
+            optional: false,
+            clear_first: true,
+        }],
+        submit: None,
+        success_indicators: None,
+        content_hash: vec![7, 8, 9],
+        enabled: true,
+    });
 
     // Register active browser session
     let session_id = BrowserSessionId::new();
@@ -100,6 +157,21 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         last_heartbeat_at: Utc::now(),
     };
     state.register_browser_session(session);
+    state.register_page_context(
+        PageContext {
+            tab_id: 1,
+            frame_id: 0,
+            top_origin: origin.clone(),
+            frame_origin: origin.clone(),
+            navigation_epoch: 1,
+            document_id: "doc-1".to_string(),
+            path_sha256: "path-hash".to_string(),
+            tls: true,
+            incognito: false,
+            observed_at: Utc::now(),
+        },
+        session_id.clone(),
+    );
 
     (state, session_id, origin)
 }
@@ -461,6 +533,6 @@ async fn test_sensitive_form_fill_flow() {
         .expect("consume should succeed");
 
     assert_eq!(consume_resp.fields.len(), 1);
-    assert_eq!(consume_resp.fields[0].role, "sensitive_text");
+    assert_eq!(consume_resp.fields[0].role, "recovery_code");
     assert_eq!(consume_resp.fields[0].encrypted_value, "REC-8842-9911-3320");
 }

@@ -65,10 +65,10 @@ impl PolicyEvaluator {
                 if !dest.origin.matches(target_origin) {
                     return false;
                 }
-                if let (Some(req_path), Some(rule_path)) = (path_prefix, &dest.path_prefix) {
-                    req_path.starts_with(rule_path)
-                } else {
-                    true
+                match (path_prefix, &dest.path_prefix) {
+                    (Some(req_path), Some(rule_path)) => req_path.starts_with(rule_path),
+                    (None, Some(_)) => false,
+                    (_, None) => true,
                 }
             });
 
@@ -187,6 +187,18 @@ mod tests {
                 "github-work",
                 ActionKind::AuthenticatePassword,
                 &other_origin,
+                None,
+                "managed",
+            )
+            .is_err());
+
+        // Omitting a path must never broaden a path-constrained rule.
+        assert!(evaluator
+            .evaluate(
+                &agent_id,
+                "github-work",
+                ActionKind::AuthenticatePassword,
+                &origin,
                 None,
                 "managed",
             )

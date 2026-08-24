@@ -1,6 +1,7 @@
 use secretctl_crypto::KeyPair;
 use secretctl_policy::{PolicyDocument, PolicyEvaluator};
 use secretctl_provider_macos::MacOsKeychainProvider;
+use secretctl_providers::SecretProvider;
 use secretctl_store::SqliteStore;
 use secretctld::{BrokerServer, BrokerState};
 use std::path::PathBuf;
@@ -19,8 +20,12 @@ async fn main() -> anyhow::Result<()> {
     let db_path = secretctl_dir.join("secretctl.db");
     let store = SqliteStore::open(&db_path)?;
 
-    let broker_key = KeyPair::generate();
     let provider = Arc::new(MacOsKeychainProvider::new());
+    let broker_key_bytes = provider
+        .get_secret("installation-signing-key")
+        .await
+        .map_err(|_| anyhow::anyhow!("installation signing key unavailable; run `secretctl init`"))?;
+    let broker_key = KeyPair::from_bytes(broker_key_bytes.as_bytes())?;
 
     let default_policy = PolicyDocument {
         version: "1.0".to_string(),

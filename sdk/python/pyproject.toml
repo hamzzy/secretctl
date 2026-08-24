@@ -7,7 +7,7 @@ name = "secretctl"
 version = "0.1.0"
 description = "Local-first credential isolation for AI agents"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [
     { name = "secretctl contributors" }
@@ -19,7 +19,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Security",
 ]
-dependencies = []
+dependencies = [
+    "anyio>=4.0",
+    "pydantic>=2.6",
+]
 
 [project.optional-dependencies]
 test = [

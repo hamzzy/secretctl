@@ -1,10 +1,8 @@
-"""
-secretctl Python SDK Types
-Note: Secret-bearing fields (passwords, tokens, seeds, cookies) are intentionally excluded.
-"""
+"""Strict, agent-safe public models for the secretctl Python SDK."""
 
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Literal
+from typing import Dict, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict
 
 SecretAction = Literal[
     "authenticate.password",
@@ -14,14 +12,16 @@ SecretAction = Literal[
 ]
 
 
-@dataclass(frozen=True)
-class Target:
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class Target(StrictModel):
     origin: str
     path_prefix: Optional[str] = None
 
 
-@dataclass(frozen=True)
-class ExecuteRequest:
+class ExecuteRequest(StrictModel):
     action: SecretAction
     identity: str
     target: Target
@@ -33,9 +33,10 @@ class ExecuteRequest:
     client_context: Optional[Dict[str, str]] = None
 
 
-@dataclass(frozen=True)
-class ExecuteResult:
-    status: Literal["completed", "capability_issued", "denied", "expired", "cancelled", "failed"]
+class ExecuteResult(StrictModel):
+    status: Literal[
+        "completed", "capability_issued", "denied", "expired", "cancelled", "failed"
+    ]
     request_id: str
     action: Optional[str] = None
     identity: Optional[str] = None
@@ -45,3 +46,9 @@ class ExecuteResult:
     code: Optional[str] = None
     safe_message: Optional[str] = None
     completed_at: Optional[str] = None
+
+
+class ActionStatus(StrictModel):
+    request_id: str
+    state: str
+    detail: Optional[str] = None

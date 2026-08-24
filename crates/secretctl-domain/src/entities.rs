@@ -170,7 +170,14 @@ pub struct Capability {
     pub top_origin: CanonicalOrigin,
     pub frame_origin: CanonicalOrigin,
     pub browser_session_id: BrowserSessionId,
+    pub extension_key_id: String,
+    pub tab_id: u32,
+    pub frame_id: u32,
+    pub document_id: String,
     pub navigation_epoch: u64,
+    pub recipe_id: RecipeId,
+    pub recipe_hash: Vec<u8>,
+    pub policy_hash: Vec<u8>,
     pub token_hash: Vec<u8>,
     pub state: CapabilityState,
     pub max_uses: u32,
@@ -182,7 +189,7 @@ pub struct Capability {
 
 impl Capability {
     pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
-        self.state == CapabilityState::Issued || self.state == CapabilityState::Active
+        (self.state == CapabilityState::Issued || self.state == CapabilityState::Active)
             && now <= self.expires_at
             && self.used_count < self.max_uses
     }

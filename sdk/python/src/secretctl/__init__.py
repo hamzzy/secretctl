@@ -1,4 +1,12 @@
-from .client import AsyncSecretCtl
-from .types import ExecuteRequest, ExecuteResult, Target, SecretAction
+from .client import AsyncSecretCtl, SecretCtl
+from .types import ActionStatus, ExecuteRequest, ExecuteResult, Target, SecretAction
 
-__all__ = ["AsyncSecretCtl", "ExecuteRequest", "ExecuteResult", "Target", "SecretAction"]
+__all__ = [
+    "ActionStatus",
+    "AsyncSecretCtl",
+    "SecretCtl",
+    "ExecuteRequest",
+    "ExecuteResult",
+    "Target",
+    "SecretAction",
+]

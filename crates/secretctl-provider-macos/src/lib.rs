@@ -38,11 +38,17 @@ impl SecretProvider for MacOsKeychainProvider {
     async fn get_secret(&self, locator: &str) -> Result<SecretBytes, ProviderError> {
         use security_framework::passwords::get_generic_password;
 
-        let password_bytes = get_generic_password(&self.service, locator)
-            .map_err(|e| match e.code() {
-                -25300 => ProviderError::NotFound(locator.to_string()),
-                _ => ProviderError::StorageFailed(format!("macOS Keychain error: {}", e)),
-            })?;
+        let service = self.service.clone();
+        let locator = locator.to_string();
+        let password_bytes = tokio::task::spawn_blocking(move || {
+            get_generic_password(&service, &locator).map_err(|error| match error.code() {
+                -25300 => ProviderError::NotFound(locator),
+                -25293 => ProviderError::AuthenticationFailed,
+                _ => ProviderError::StorageFailed("macOS Keychain retrieval failed".to_string()),
+            })
+        })
+        .await
+        .map_err(|_| ProviderError::Internal("Keychain worker failed".to_string()))??;
 
         Ok(SecretBytes::new(password_bytes))
     }
@@ -50,9 +56,16 @@ impl SecretProvider for MacOsKeychainProvider {
     async fn store_secret(&self, locator: &str, secret: &[u8]) -> Result<(), ProviderError> {
         use security_framework::passwords::set_generic_password;
 
-        set_generic_password(&self.service, locator, secret).map_err(|e| {
-            ProviderError::StorageFailed(format!("Failed to store in macOS Keychain: {}", e))
-        })?;
+        let service = self.service.clone();
+        let locator = locator.to_string();
+        let secret = zeroize::Zeroizing::new(secret.to_vec());
+        tokio::task::spawn_blocking(move || {
+            set_generic_password(&service, &locator, &secret).map_err(|_| {
+                ProviderError::StorageFailed("macOS Keychain storage failed".to_string())
+            })
+        })
+        .await
+        .map_err(|_| ProviderError::Internal("Keychain worker failed".to_string()))??;
 
         Ok(())
     }
@@ -60,10 +73,16 @@ impl SecretProvider for MacOsKeychainProvider {
     async fn delete_secret(&self, locator: &str) -> Result<(), ProviderError> {
         use security_framework::passwords::delete_generic_password;
 
-        delete_generic_password(&self.service, locator).map_err(|e| match e.code() {
-            -25300 => ProviderError::NotFound(locator.to_string()),
-            _ => ProviderError::StorageFailed(format!("Failed to delete from macOS Keychain: {}", e)),
-        })?;
+        let service = self.service.clone();
+        let locator = locator.to_string();
+        tokio::task::spawn_blocking(move || {
+            delete_generic_password(&service, &locator).map_err(|error| match error.code() {
+                -25300 => ProviderError::NotFound(locator),
+                _ => ProviderError::StorageFailed("macOS Keychain deletion failed".to_string()),
+            })
+        })
+        .await
+        .map_err(|_| ProviderError::Internal("Keychain worker failed".to_string()))??;
 
         Ok(())
     }
@@ -71,14 +90,17 @@ impl SecretProvider for MacOsKeychainProvider {
     async fn exists(&self, locator: &str) -> Result<bool, ProviderError> {
         use security_framework::passwords::get_generic_password;
 
-        match get_generic_password(&self.service, locator) {
+        let service = self.service.clone();
+        let locator = locator.to_string();
+        tokio::task::spawn_blocking(move || match get_generic_password(&service, &locator) {
             Ok(_) => Ok(true),
             Err(e) if e.code() == -25300 => Ok(false),
-            Err(e) => Err(ProviderError::StorageFailed(format!(
-                "macOS Keychain error: {}",
-                e
-            ))),
-        }
+            Err(_) => Err(ProviderError::StorageFailed(
+                "macOS Keychain lookup failed".to_string(),
+            )),
+        })
+        .await
+        .map_err(|_| ProviderError::Internal("Keychain worker failed".to_string()))?
     }
 }
 

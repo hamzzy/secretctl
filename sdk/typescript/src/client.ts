@@ -3,7 +3,43 @@ import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
 import { LengthPrefixedSocket } from "./framing.js";
-import { ExecuteRequest, ExecuteResult, SecretCtlErrorCode } from "./types.js";
+import { ActionStatus, ConnectOptions, ExecuteRequest, ExecuteResult, SecretCtlErrorCode } from "./types.js";
+
+const PROHIBITED_RESPONSE_KEYS = [
+  "password", "secret", "token", "seed", "cookie", "authorization",
+  "private_key", "refresh_token", "access_token", "capability_token"
+];
+
+function assertAgentSafe(value: unknown): void {
+  if (Array.isArray(value)) {
+    value.forEach(assertAgentSafe);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      const normalized = key.toLowerCase();
+      if (PROHIBITED_RESPONSE_KEYS.some((part) => normalized.includes(part))) {
+        throw new Error("secretctl rejected an unsafe broker response");
+      }
+      assertAgentSafe(child);
+    }
+  }
+}
+
+const ERROR_CODES: Record<number, SecretCtlErrorCode> = {
+  [-32001]: "AUTH_POLICY_DENIED",
+  [-32002]: "APPROVAL_REJECTED",
+  [-32003]: "APPROVAL_TIMEOUT",
+  [-32004]: "CAPABILITY_EXPIRED",
+  [-32005]: "CAPABILITY_CONSUMED",
+  [-32006]: "EPOCH_INVALIDATED",
+  [-32007]: "ORIGIN_MISMATCH",
+  [-32008]: "FRAME_VIOLATION",
+  [-32009]: "SESSION_TERMINATED",
+  [-32010]: "EXECUTOR_FAILED",
+  [-32011]: "RECIPE_NOT_FOUND",
+  [-32099]: "SECURITY_VIOLATION"
+};
 
 export class SecretCtl {
   private socket: LengthPrefixedSocket;
@@ -12,14 +48,21 @@ export class SecretCtl {
     this.socket = socket;
   }
 
-  public static async connect(socketPath?: string): Promise<SecretCtl> {
+  public static async connect(options: ConnectOptions): Promise<SecretCtl> {
     const defaultPath = path.join(os.homedir(), ".secretctl", "run", "agent.sock");
-    const targetSocket = socketPath || defaultPath;
+    const targetSocket = options.socketPath || defaultPath;
 
     return new Promise((resolve, reject) => {
       const client = net.createConnection(targetSocket, () => {
         const framed = new LengthPrefixedSocket(client);
-        resolve(new SecretCtl(framed));
+        const secretctl = new SecretCtl(framed);
+        secretctl.rpc("session.hello", {
+          protocol_version: "1.0",
+          role: "agent",
+          principal_id: options.principalId,
+          client_nonce: crypto.randomUUID(),
+          supported_suites: ["X25519_CHACHA20_POLY1305_ED25519"]
+        }).then(() => resolve(secretctl), reject);
       });
 
       client.on("error", (err) => {
@@ -28,14 +71,35 @@ export class SecretCtl {
     });
   }
 
-  public async execute(request: ExecuteRequest): Promise<ExecuteResult> {
-    const requestId = request.requestId || `req_${crypto.randomUUID()}`;
-
+  private async rpc(method: string, params: Record<string, unknown>): Promise<any> {
     const rpcReq = {
       jsonrpc: "2.0",
       id: `rpc_${crypto.randomUUID()}`,
-      method: "action.request",
-      params: {
+      method,
+      params
+    };
+    await this.socket.send(Buffer.from(JSON.stringify(rpcReq)));
+    const respBuf = await this.socket.readNext();
+    const rpcResp: unknown = JSON.parse(respBuf.toString("utf8"));
+    assertAgentSafe(rpcResp);
+    if (!rpcResp || typeof rpcResp !== "object") {
+      throw new Error("Invalid secretctl response");
+    }
+    const response = rpcResp as { error?: { code?: number; message?: string }; result?: unknown };
+    if (response.error) {
+      const code = ERROR_CODES[response.error.code ?? 0] || "INTERNAL_ERROR";
+      const error = new Error(response.error.message || "Action failed") as Error & { code: SecretCtlErrorCode };
+      error.code = code;
+      throw error;
+    }
+    return response.result;
+  }
+
+  public async execute(request: ExecuteRequest): Promise<ExecuteResult> {
+    const requestId = request.requestId || `req_${crypto.randomUUID()}`;
+
+    try {
+      const res = await this.rpc("action.request", {
         request_id: requestId,
         action: request.action,
         identity: request.identity,
@@ -49,33 +113,43 @@ export class SecretCtl {
         wait: true,
         timeout_ms: request.timeoutMs || 60000,
         client_context: request.clientContext
+      });
+      if (!res || typeof res !== "object" || typeof res.request_id !== "string" || typeof res.state !== "string") {
+        throw new Error("Invalid action response shape");
       }
-    };
-
-    await this.socket.send(Buffer.from(JSON.stringify(rpcReq)));
-    const respBuf = await this.socket.readNext();
-    const rpcResp = JSON.parse(respBuf.toString("utf8"));
-
-    if (rpcResp.error) {
+      return {
+        status: res.state === "capability_issued" ? "capability_issued" : "completed",
+        requestId: res.request_id,
+        action: request.action,
+        identity: request.identity,
+        verifiedOrigin: request.target.origin,
+        browserSessionId: request.browserSessionId,
+        evidenceId: res.evidence_ref,
+        completedAt: res.completed_at
+      };
+    } catch (error) {
+      const safeError = error as Error & { code?: SecretCtlErrorCode };
       return {
         status: "failed",
         requestId,
-        code: (rpcResp.error.message as SecretCtlErrorCode) || "INTERNAL_ERROR",
-        safeMessage: rpcResp.error.message || "Action failed"
+        code: safeError.code || "INTERNAL_ERROR",
+        safeMessage: safeError.message || "Action failed"
       };
     }
+  }
 
-    const res = rpcResp.result;
+  public async status(requestId: string): Promise<ActionStatus> {
+    const result = await this.rpc("action.status", { request_id: requestId });
     return {
-      status: res.state === "capability_issued" ? "capability_issued" : "completed",
-      requestId: res.request_id,
-      action: request.action,
-      identity: request.identity,
-      verifiedOrigin: request.target.origin,
-      browserSessionId: request.browserSessionId,
-      evidenceId: res.evidence_ref,
-      completedAt: res.completed_at || new Date().toISOString()
+      requestId: result.request_id,
+      state: result.state,
+      detail: result.detail
     };
+  }
+
+  public async cancel(requestId: string, reason?: string): Promise<boolean> {
+    const result = await this.rpc("action.cancel", { request_id: requestId, reason });
+    return result.cancelled === true;
   }
 
   public close() {

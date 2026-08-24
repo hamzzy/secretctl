@@ -24,6 +24,17 @@ export type SecretCtlErrorCode =
   | "SECURITY_VIOLATION"
   | "INTERNAL_ERROR";
 
+export interface ConnectOptions {
+  principalId: string;
+  socketPath?: string;
+}
+
+export interface ActionStatus {
+  requestId: string;
+  state: string;
+  detail?: string;
+}
+
 export interface TargetConstraint {
   origin: string;
   pathPrefix?: string;

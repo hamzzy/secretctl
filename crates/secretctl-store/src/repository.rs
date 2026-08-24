@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use crate::migrations::apply_migrations;
 use rusqlite::{params, Connection};
-use secretctl_domain::{AgentPrincipal, AuditEvent};
+use secretctl_domain::{ActionKind, AgentPrincipal, AuditEvent, CredentialDescriptor, CredentialId, EventId};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -13,6 +13,9 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StoreError> {
         let mut conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         apply_migrations(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -21,6 +24,8 @@ impl SqliteStore {
 
     pub fn in_memory() -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         apply_migrations(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -44,6 +49,16 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn agent_exists(&self, agent_id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agents WHERE agent_id = ?1 AND state = 'enrolled'",
+            [agent_id],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
     pub fn insert_audit_event(&self, event: &AuditEvent) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -63,6 +78,120 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn insert_credential(&self, credential: &CredentialDescriptor) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let allowed_actions = serde_json::to_string(&credential.allowed_actions)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO credentials
+             (credential_id, name, kind, provider, provider_locator, allowed_actions_json, metadata_json, disabled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                credential.credential_id.as_str(),
+                credential.name,
+                credential.kind,
+                credential.provider,
+                credential.provider_locator,
+                allowed_actions,
+                credential.metadata_json,
+                credential.disabled_at.map(|value| value.to_rfc3339()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_credential_by_name(
+        &self,
+        name: &str,
+    ) -> Result<CredentialDescriptor, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT credential_id, name, kind, provider, provider_locator,
+                    allowed_actions_json, metadata_json, disabled_at
+             FROM credentials WHERE name = ?1",
+            [name],
+            |row| {
+                let credential_id: String = row.get(0)?;
+                let allowed_actions_json: String = row.get(5)?;
+                let disabled_at: Option<String> = row.get(7)?;
+                let allowed_actions: Vec<ActionKind> = serde_json::from_str(&allowed_actions_json)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    ))?;
+                let disabled_at = disabled_at
+                    .map(|value| {
+                        chrono::DateTime::parse_from_rfc3339(&value)
+                            .map(|parsed| parsed.with_timezone(&chrono::Utc))
+                            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                                7,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            ))
+                    })
+                    .transpose()?;
+                Ok(CredentialDescriptor {
+                    credential_id: CredentialId::parse(&credential_id).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    provider: row.get(3)?,
+                    provider_locator: row.get(4)?,
+                    allowed_actions,
+                    metadata_json: row.get(6)?,
+                    disabled_at,
+                })
+            },
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => StoreError::NotFound(name.to_string()),
+            other => StoreError::Sqlite(other),
+        })
+    }
+
+    pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT sequence, event_id, event_type, actor_type, actor_id, event_json,
+                    previous_hash, event_hash, created_at
+             FROM audit_events ORDER BY sequence",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let event_id: String = row.get(1)?;
+            let created_at: String = row.get(8)?;
+            Ok(AuditEvent {
+                sequence: row.get::<_, i64>(0)? as u64,
+                event_id: EventId::parse(&event_id).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
+                event_type: row.get(2)?,
+                actor_type: row.get(3)?,
+                actor_id: row.get(4)?,
+                event_json: row.get(5)?,
+                previous_hash: row.get(6)?,
+                event_hash: row.get(7)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|parsed| parsed.with_timezone(&chrono::Utc))
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    ))?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    }
+
     pub fn get_latest_audit_hash(&self) -> Result<Vec<u8>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let result: Option<Vec<u8>> = conn
@@ -73,6 +202,16 @@ impl SqliteStore {
             )
             .ok();
         Ok(result.unwrap_or_else(|| secretctl_audit::GENESIS_PREVIOUS_HASH.to_vec()))
+    }
+
+    pub fn get_latest_audit_sequence(&self) -> Result<u64, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sequence: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM audit_events",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(sequence as u64)
     }
 }
 

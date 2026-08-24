@@ -13,6 +13,8 @@ pub enum ActionRequestState {
     Completed,
     Denied,
     Expired,
+    Cancelled,
+    Indeterminate,
     Revoked,
     Failed,
 }
@@ -21,7 +23,13 @@ impl ActionRequestState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Denied | Self::Expired | Self::Revoked | Self::Failed
+            Self::Completed
+                | Self::Denied
+                | Self::Expired
+                | Self::Cancelled
+                | Self::Indeterminate
+                | Self::Revoked
+                | Self::Failed
         )
     }
 
@@ -45,7 +53,11 @@ impl ActionRequestState {
             (Self::Executing, Self::Completed) => true,
             (Self::Executing, Self::Failed) => true,
             // Any active state can transition to Failed/Expired/Revoked
-            (_, Self::Expired) | (_, Self::Revoked) | (_, Self::Failed) => true,
+            (_, Self::Expired)
+            | (_, Self::Cancelled)
+            | (_, Self::Indeterminate)
+            | (_, Self::Revoked)
+            | (_, Self::Failed) => true,
             _ => false,
         };
 
@@ -70,6 +82,8 @@ impl ActionRequestState {
             Self::Completed => "completed",
             Self::Denied => "denied",
             Self::Expired => "expired",
+            Self::Cancelled => "cancelled",
+            Self::Indeterminate => "indeterminate",
             Self::Revoked => "revoked",
             Self::Failed => "failed",
         }
@@ -185,11 +199,12 @@ pub enum ExecutionState {
     Consuming,
     Completed,
     Failed,
+    Indeterminate,
 }
 
 impl ExecutionState {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed)
+        matches!(self, Self::Completed | Self::Failed | Self::Indeterminate)
     }
 
     pub fn transition_to(&self, next: ExecutionState) -> Result<ExecutionState, DomainError> {
@@ -204,6 +219,7 @@ impl ExecutionState {
             (Self::Prepared, Self::Consuming) => true,
             (Self::Consuming, Self::Completed) => true,
             (Self::Consuming, Self::Failed) => true,
+            (Self::Consuming, Self::Indeterminate) => true,
             (Self::Prepared, Self::Failed) => true,
             _ => false,
         };
@@ -224,6 +240,7 @@ impl ExecutionState {
             Self::Consuming => "consuming",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Indeterminate => "indeterminate",
         }
     }
 }

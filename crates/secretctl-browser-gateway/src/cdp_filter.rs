@@ -1,9 +1,12 @@
 use crate::error::GatewayError;
 use serde_json::Value;
+use secretctl_crypto::contains_prohibited_key_name;
 use std::collections::HashSet;
 use std::sync::RwLock;
 
 const PROHIBITED_CDP_METHODS: &[&str] = &[
+    "Runtime.evaluate",
+    "Runtime.callFunctionOn",
     "Network.getAllCookies",
     "Network.getCookies",
     "Network.setCookie",
@@ -14,6 +17,34 @@ const PROHIBITED_CDP_METHODS: &[&str] = &[
     "DOMStorage.getDOMStorageItems",
     "IndexedDB.requestData",
     "IndexedDB.requestDatabaseNames",
+    "Network.getResponseBody",
+    "Network.getRequestPostData",
+    "DOM.getOuterHTML",
+    "Browser.getBrowserCommandLine",
+    "Browser.setDownloadBehavior",
+    "Page.setDownloadBehavior",
+    "Target.attachToTarget",
+];
+
+const ALLOWED_CDP_METHODS: &[&str] = &[
+    "Browser.getVersion",
+    "DOM.describeNode",
+    "DOM.getBoxModel",
+    "DOM.getDocument",
+    "DOM.querySelector",
+    "DOM.querySelectorAll",
+    "Input.dispatchKeyEvent",
+    "Input.dispatchMouseEvent",
+    "Input.insertText",
+    "Page.getNavigationHistory",
+    "Page.navigate",
+    "Page.navigateToHistoryEntry",
+    "Page.reload",
+    "Page.stopLoading",
+    "Target.activateTarget",
+    "Target.closeTarget",
+    "Target.createTarget",
+    "Target.getTargets",
 ];
 
 const SENSITIVE_WINDOW_BLOCKED_METHODS: &[&str] = &[
@@ -63,12 +94,25 @@ impl CdpFilter {
     pub fn validate_cdp_command(&self, method: &str, tab_id: Option<u32>) -> Result<(), GatewayError> {
         // 1. Check globally prohibited methods
         for &prohibited in PROHIBITED_CDP_METHODS {
-            if method == prohibited || method.starts_with("Storage.") || method.starts_with("DOMStorage.") {
+            if method == prohibited
+                || method.starts_with("Storage.")
+                || method.starts_with("DOMStorage.")
+                || method.starts_with("IndexedDB.")
+            {
                 return Err(GatewayError::CommandDenied(format!(
                     "CDP method '{}' is prohibited by secretctl security policy",
                     method
                 )));
             }
+        }
+
+        if !ALLOWED_CDP_METHODS.contains(&method)
+            && !SENSITIVE_WINDOW_BLOCKED_METHODS.contains(&method)
+        {
+            return Err(GatewayError::CommandDenied(format!(
+                "Unknown CDP method '{}' is denied by default",
+                method
+            )));
         }
 
         // 2. Check sensitive window restrictions
@@ -166,7 +210,7 @@ impl CdpFilter {
             Value::Object(map) => {
                 for (k, v) in map.iter_mut() {
                     let k_lower = k.to_ascii_lowercase();
-                    if k_lower == "password" || k_lower == "secret" || k_lower == "authorization" {
+                    if contains_prohibited_key_name(&k_lower) {
                         *v = Value::String("[REDACTED]".to_string());
                     } else {
                         Self::sanitize_generic_json(v);
@@ -199,6 +243,9 @@ mod tests {
         assert!(filter.validate_cdp_command("Network.getAllCookies", None).is_err());
         assert!(filter.validate_cdp_command("Storage.getCookies", None).is_err());
         assert!(filter.validate_cdp_command("Page.navigate", None).is_ok());
+        assert!(filter.validate_cdp_command("Runtime.evaluate", None).is_err());
+        assert!(filter.validate_cdp_command("Network.getResponseBody", None).is_err());
+        assert!(filter.validate_cdp_command("MadeUp.readSecrets", None).is_err());
     }
 
     #[test]

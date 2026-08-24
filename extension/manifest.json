@@ -19,6 +19,14 @@
     "service_worker": "src/background/service_worker.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["src/content/executor.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "action": {
     "default_popup": "src/popup/popup.html",
     "default_title": "secretctl Enforcement"

@@ -114,7 +114,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "EXECUTE_CONSUME") {
     sendNativeRequest("executor.consume", message.params)
-      .then((res) => sendResponse({ success: true, result: res }))
+      .then(async (res) => {
+        const context = message.params.current_context;
+        const executionResult = await chrome.tabs.sendMessage(
+          context.tab_id,
+          {
+            type: "SECRETCTL_EXECUTE",
+            fields: res.fields,
+            submitSelector: res.auto_submit_selector,
+            executionId: res.execution_id,
+            expectedOrigin: typeof context.top_origin === "string"
+              ? context.top_origin
+              : `${context.top_origin.scheme}://${context.top_origin.host}:${context.top_origin.port}`
+          },
+          { frameId: context.frame_id }
+        );
+        await sendNativeRequest("executor.result", executionResult);
+        sendResponse({
+          success: true,
+          result: {
+            execution_id: res.execution_id,
+            status: executionResult.status,
+            result_code: executionResult.result_code
+          }
+        });
+      })
       .catch((err) => sendResponse({ success: false, error: err }));
     return true;
   }

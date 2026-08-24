@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 1;
+pub const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
@@ -165,6 +165,18 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
 
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at, checksum) VALUES (1, datetime('now'), 'v1_initial')",
+            [],
+        )?;
+    }
+
+    if version < 2 {
+        tx.execute(
+            "ALTER TABLE credentials ADD COLUMN allowed_actions_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at, checksum)
+             VALUES (2, datetime('now'), 'v2_credential_allowed_actions')",
             [],
         )?;
     }

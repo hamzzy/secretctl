@@ -3,7 +3,8 @@ use crate::state::BrokerState;
 use futures::{SinkExt, StreamExt};
 use secretctl_domain::AgentId;
 use secretctl_protocol::{
-    ActionRequestParams, ExecutorConsumeParams, ExecutorHeartbeatParams, ExecutorPrepareParams,
+    ActionCancelParams, ActionRequestParams, ActionStatusParams, ExecutorConsumeParams,
+    ExecutorHeartbeatParams, ExecutorPrepareParams,
     ExecutorResultParams, LengthPrefixedCodec, RpcError, RpcErrorCode, RpcRequest,
     RpcResponse, SessionHelloParams, SessionHelloResult,
 };
@@ -39,6 +40,15 @@ impl BrokerServer {
         let agent_listener = UnixListener::bind(&agent_sock_path)?;
         let executor_listener = UnixListener::bind(&executor_sock_path)?;
         let admin_listener = UnixListener::bind(&admin_sock_path)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&agent_sock_path, permissions.clone())?;
+            std::fs::set_permissions(&executor_sock_path, permissions.clone())?;
+            std::fs::set_permissions(&admin_sock_path, permissions)?;
+        }
 
         info!(
             "secretctld listening on: agent={:?}, executor={:?}, admin={:?}",
@@ -123,7 +133,16 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
         let response: RpcResponse<serde_json::Value> = match method {
             "session.hello" => {
                 let params: SessionHelloParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
-                authenticated_agent = Some(AgentId::parse(&params.principal_id).unwrap_or_default());
+                if params.protocol_version != "1.0"
+                    || params.role != "agent"
+                    || !state.store.agent_exists(&params.principal_id)?
+                {
+                    RpcResponse::error(
+                        id,
+                        RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "Agent enrollment rejected"),
+                    )
+                } else {
+                    authenticated_agent = Some(AgentId::parse(&params.principal_id)?);
                 let res = SessionHelloResult {
                     protocol_version: "1.0".to_string(),
                     server_nonce: uuid::Uuid::new_v4().to_string(),
@@ -133,13 +152,50 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
                     signature: "mock_handshake_sig".to_string(),
                 };
                 RpcResponse::success(id, serde_json::to_value(res)?)
+                }
             }
             "action.request" => {
-                let agent_id = authenticated_agent.clone().unwrap_or_default();
-                let params: ActionRequestParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
-                match state.handle_action_request(agent_id, params).await {
-                    Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
-                    Err(err) => RpcResponse::error(id, err),
+                if let Some(agent_id) = authenticated_agent.clone() {
+                    let params: ActionRequestParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                    match state.handle_action_request(agent_id, params).await {
+                        Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
+                        Err(err) => RpcResponse::error(id, err),
+                    }
+                } else {
+                    RpcResponse::error(
+                        id,
+                        RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "session.hello required"),
+                    )
+                }
+            }
+            "action.status" => {
+                if let Some(agent_id) = authenticated_agent.as_ref() {
+                    let params: ActionStatusParams =
+                        serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                    match state.handle_action_status(agent_id, params) {
+                        Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
+                        Err(err) => RpcResponse::error(id, err),
+                    }
+                } else {
+                    RpcResponse::error(
+                        id,
+                        RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "session.hello required"),
+                    )
+                }
+            }
+            "action.cancel" => {
+                if let Some(agent_id) = authenticated_agent.as_ref() {
+                    let params: ActionCancelParams =
+                        serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                    match state.handle_action_cancel(agent_id, params) {
+                        Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
+                        Err(err) => RpcResponse::error(id, err),
+                    }
+                } else {
+                    RpcResponse::error(
+                        id,
+                        RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "session.hello required"),
+                    )
                 }
             }
             _ => RpcResponse::error(
