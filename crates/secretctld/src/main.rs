@@ -10,8 +10,12 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-    info!("Starting secretctld daemon...");
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    println!("Starting secretctld daemon...");
 
     let home_dir = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let secretctl_dir = PathBuf::from(home_dir).join(".secretctl");
@@ -25,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         let secret = provider.get_secret("installation-signing-key").await?;
         KeyPair::from_bytes(secret.as_bytes())?
     } else {
-        info!("No installation signing key found. Generating a new key in macOS Keychain...");
+        println!("No installation signing key found. Generating a new key in macOS Keychain...");
         let keypair = KeyPair::generate();
         provider
             .store_secret("installation-signing-key", &keypair.to_bytes())
@@ -43,12 +47,18 @@ async fn main() -> anyhow::Result<()> {
 
     let state = BrokerState::new(broker_key, "broker-key-default", store, provider, evaluator);
     let runtime_dir = secretctl_dir.join("run");
-    let server = BrokerServer::new(state, runtime_dir);
+    let server = BrokerServer::new(state, runtime_dir.clone());
 
     server.start().await?;
 
-    info!("secretctld daemon started successfully.");
+    println!("secretctld daemon started successfully.");
+    println!("Listening on Unix domain sockets in: {:?}", runtime_dir);
+    println!("  - agent:    {:?}", runtime_dir.join("agent.sock"));
+    println!("  - executor: {:?}", runtime_dir.join("executor.sock"));
+    println!("  - admin:    {:?}", runtime_dir.join("admin.sock"));
+    println!("Press Ctrl+C to stop.\n");
+
     tokio::signal::ctrl_c().await?;
-    info!("secretctld shutting down.");
+    println!("secretctld shutting down.");
     Ok(())
 }
