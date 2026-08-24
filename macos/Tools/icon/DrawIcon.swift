@@ -135,4 +135,9 @@ for (name, pixels) in iconSizes {
 let markData = render(size: 1024, background: nil)
 try markData.write(to: URL(fileURLWithPath: "\(outputDirectory)/../mark.png"))
 
-print("rendered \(iconSizes.count) icon sizes into \(outputDirectory)")
+// Render standard secretctl.png logo
+let logoData = render(size: 512, background: nil)
+try? logoData.write(to: URL(fileURLWithPath: "\(outputDirectory)/../secretctl.png"))
+try? logoData.write(to: URL(fileURLWithPath: "\(outputDirectory)/secretctl.png"))
+
+print("rendered \(iconSizes.count) icon sizes and secretctl.png into \(outputDirectory)")

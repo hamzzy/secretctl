@@ -192,7 +192,7 @@ struct AgentsPane: View {
                                 .padding(.horizontal, 5).padding(.vertical, 1)
                                 .background(Color.secondary.opacity(0.15), in: Capsule())
                         }
-                        Text("\(agent.activeGrants) standing \(agent.activeGrants == 1 ? "authorization" : "authorizations") · \(agent.recentEventCount) recent events")
+                        Text("\(Plural.counted(Int(agent.activeGrants), one: "standing authorization", other: "standing authorizations")) · \(Plural.counted(Int(agent.recentEventCount), one: "recent event", other: "recent events"))")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                         Text(agent.lastActivityAt.map { "Last activity \(RelativeTime.spoken($0))" } ?? "No activity yet")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -269,7 +269,7 @@ struct GrantsPane: View {
                             }
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
-                            Text("Expires \(RelativeTime.full(grant.expiresAt)) · used \(grant.useCount) \(grant.useCount == 1 ? "time" : "times")")
+                            Text("Expires \(RelativeTime.full(grant.expiresAt)) · used \(Plural.counted(Int(grant.useCount), one: "time", other: "times"))")
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
                             if let reason = grant.revokedReason {
                                 Text("Revoked: \(reason)").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -387,7 +387,7 @@ struct BrowsersPane: View {
                                 .padding(.horizontal, 5).padding(.vertical, 1)
                                 .background(Color.secondary.opacity(0.15), in: Capsule())
                         }
-                        Text("Assurance: \(session.assurance) · \(session.activeTabCount) \(session.activeTabCount == 1 ? "tab" : "tabs")")
+                        Text("Assurance: \(session.assurance) · \(Plural.counted(Int(session.activeTabCount), one: "tab", other: "tabs"))")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                         if !session.currentOrigins.isEmpty {
                             Text(session.currentOrigins.joined(separator: ", "))

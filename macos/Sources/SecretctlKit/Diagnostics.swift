@@ -66,6 +66,17 @@ public enum Diagnostics {
             \(presentation.code.map(String.init) ?? "-", privacy: .public)
             """)
     }
+
+    public static let updater = Logger(subsystem: subsystem, category: "updater")
+    public static let crash = Logger(subsystem: subsystem, category: "crash")
+
+    public static func recordCrash(_ signal: Int32, reason: String) {
+        crash.fault("Process terminated with signal \(signal, privacy: .public): \(reason, privacy: .public)")
+    }
+
+    public static func checkForUpdates(currentVersion: String) {
+        updater.info("Checking for application updates (current: \(currentVersion, privacy: .public))")
+    }
 }
 
 extension Diagnostics {

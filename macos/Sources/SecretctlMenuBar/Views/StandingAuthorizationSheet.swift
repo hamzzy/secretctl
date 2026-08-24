@@ -103,7 +103,7 @@ struct StandingAuthorizationSheet: View {
             SectionHeading(title: "Expires")
             Picker("Expires", selection: $ttlDays) {
                 ForEach(ttlChoices, id: \.self) { days in
-                    Text(days == 1 ? "1 day" : "\(days) days").tag(days)
+                    Text(Plural.counted(days, one: "day", other: "days")).tag(days)
                 }
             }
             .pickerStyle(.segmented)

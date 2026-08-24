@@ -5,6 +5,9 @@
    replace the values, never the keys. Placeholders must keep their order;
    use %1$@ style indices where a language needs to reorder them. */
 
+/* AppDelegate.swift */
+" %lld" = " %lld";
+
 /* ManageWindow.swift */
 "#%lld" = "#%lld";
 
@@ -29,8 +32,8 @@
 /* DesignSystem.swift, SettingsPane.swift */
 "%@: %@" = "%@: %@";
 
-/* ManageWindow.swift */
-"%lld standing \\(agent.activeGrants == 1 ? " = "%lld standing \\(agent.activeGrants == 1 ? ";
+/* Plural.swift */
+"%lld %@" = "%lld %@";
 
 /* PopoverView.swift */
 "A sensitive browser operation was stopped. secretctl could no longer verify browser protection, so credential release was halted where possible." = "A sensitive browser operation was stopped. secretctl could no longer verify browser protection, so credential release was halted where possible.";
@@ -48,7 +51,7 @@
 "Ask for %@ on high-risk actions" = "Ask for %@ on high-risk actions";
 
 /* ManageWindow.swift */
-"Assurance: %@ · %@ \\(session.activeTabCount == 1 ? " = "Assurance: %@ · %@ \\(session.activeTabCount == 1 ? ";
+"Assurance: %@ · \\(Plural.counted(Int(session.activeTabCount), one: " = "Assurance: %@ · \\(Plural.counted(Int(session.activeTabCount), one: ";
 
 /* StandingAuthorizationSheet.swift */
 "Authorization lifetime in days" = "Authorization lifetime in days";
@@ -77,6 +80,9 @@
 /* ManageWindow.swift, StandingAuthorizationSheet.swift */
 "Cancel" = "Cancel";
 
+/* DesignSystem.swift */
+"Collapsed" = "Collapsed";
+
 /* UiModels.swift */
 "Complete TOTP" = "Complete TOTP";
 
@@ -85,6 +91,18 @@
 
 /* PopoverView.swift, UiModels.swift */
 "Completed — evidence lost" = "Completed — evidence lost";
+
+/* DesignSystem.swift */
+"Confirmed" = "Confirmed";
+
+/* SettingsPane.swift */
+"Connected" = "Connected";
+
+/* PopoverView.swift */
+"Connecting to secretctld" = "Connecting to secretctld";
+
+/* OnboardingView.swift */
+"Continue" = "Continue";
 
 /* StandingAuthorizationSheet.swift */
 "Create authorization" = "Create authorization";
@@ -116,6 +134,9 @@
 /* ApprovalWindowView.swift */
 "Dismiss" = "Dismiss";
 
+/* OnboardingView.swift */
+"Done" = "Done";
+
 /* ErrorPresentation.swift */
 "Each authorization can be used once. The agent will need to ask again." = "Each authorization can be used once. The agent will need to ask again.";
 
@@ -125,6 +146,9 @@
 /* ManageWindow.swift */
 "Enrolled %@" = "Enrolled %@";
 
+/* DesignSystem.swift */
+"Expanded" = "Expanded";
+
 /* StandingAuthorizationSheet.swift */
 "Expires" = "Expires";
 
@@ -132,7 +156,7 @@
 "Expires %@" = "Expires %@";
 
 /* ManageWindow.swift */
-"Expires %@ · used %@ \\(grant.useCount == 1 ? " = "Expires %@ · used %@ \\(grant.useCount == 1 ? ";
+"Expires %@ · used \\(Plural.counted(Int(grant.useCount), one: " = "Expires %@ · used \\(Plural.counted(Int(grant.useCount), one: ";
 
 /* UiModels.swift */
 "Fill sensitive form" = "Fill sensitive form";
@@ -170,6 +194,9 @@
 /* UiModels.swift */
 "Medium" = "Medium";
 
+/* main.swift */
+"NOT verified" = "NOT verified";
+
 /* ErrorPresentation.swift */
 "No credential operation can run until it reconnects." = "No credential operation can run until it reconnects.";
 
@@ -184,6 +211,18 @@
 
 /* ErrorPresentation.swift */
 "No site recipe matched this destination." = "No site recipe matched this destination.";
+
+/* DesignSystem.swift */
+"Not confirmed" = "Not confirmed";
+
+/* SettingsPane.swift */
+"Not reachable" = "Not reachable";
+
+/* ManageWindow.swift */
+"Not used by any agent yet" = "Not used by any agent yet";
+
+/* SettingsPane.swift */
+"Not verified" = "Not verified";
 
 /* ErrorPresentation.swift */
 "Nothing further happened. The agent has been told it was refused." = "Nothing further happened. The agent has been told it was refused.";
@@ -362,17 +401,32 @@
 /* ManageWindow.swift */
 "Try again" = "Try again";
 
+/* ManageWindow.swift */
+"Used by \\(credential.usedBy.joined(separator: " = "Used by \\(credential.usedBy.joined(separator: ";
+
+/* SettingsPane.swift */
+"Verified" = "Verified";
+
 /* PopoverView.swift */
 "Verified, no specific protections reported" = "Verified, no specific protections reported";
 
 /* PopoverView.swift */
 "View details" = "View details";
 
-/* DesignSystem.swift */
-"\\(confirmed ? " = "\\(confirmed ? ";
+/* PopoverView.swift */
+"Waiting for you" = "Waiting for you";
+
+/* PopoverView.swift */
+"Waiting for you (%lld)" = "Waiting for you (%lld)";
 
 /* ManageWindow.swift */
-"disabled" = "disabled";
+"\\(Plural.counted(Int(agent.activeGrants), one: " = "\\(Plural.counted(Int(agent.activeGrants), one: ";
+
+/* OnboardingView.swift */
+"\\(Plural.counted(Int(store.status.browserSessionsConnected), one: " = "\\(Plural.counted(Int(store.status.browserSessionsConnected), one: ";
+
+/* DesignSystem.swift */
+"\\(confirmed ? " = "\\(confirmed ? ";
 
 /* InstallationSigningKey.swift */
 "macOS did not allow secretctl to read its installation key from the Keychain." = "macOS did not allow secretctl to read its installation key from the Keychain.";
@@ -382,9 +436,6 @@
 
 /* ManageWindow.swift */
 "presence required" = "presence required";
-
-/* ManageWindow.swift, PopoverView.swift */
-"secretctl" = "secretctl";
 
 /* ApprovalWindowView.swift */
 "secretctl closed it rather than changing what it was asking you to approve." = "secretctl closed it rather than changing what it was asking you to approve.";
@@ -452,6 +503,9 @@
 /* UiModels.swift */
 "secretctl: the outcome of the last operation could not be verified." = "secretctl: the outcome of the last operation could not be verified.";
 
+/* PopoverView.swift */
+"secretctld is not reachable" = "secretctld is not reachable";
+
 /* AdminClient.swift */
 "secretctld is not reachable: %@" = "secretctld is not reachable: %@";
 
@@ -466,4 +520,10 @@
 
 /* DesignSystem.swift */
 "· from %@" = "· from %@";
+
+/* main.swift */
+"✔" = "✔";
+
+/* main.swift */
+"✘" = "✘";
 

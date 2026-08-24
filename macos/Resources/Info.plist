@@ -10,6 +10,10 @@
     <string>com.secretctl.menubar</string>
     <key>CFBundleExecutable</key>
     <string>secretctl-menubar</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleAllowMixedLocalizations</key>
+    <false/>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

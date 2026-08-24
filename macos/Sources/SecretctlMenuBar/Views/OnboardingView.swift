@@ -94,7 +94,7 @@ struct OnboardingView: View {
             if store.status.browserSessionsConnected > 0 {
                 statusCard(
                     ok: true,
-                    title: "\(store.status.browserSessionsConnected) managed \(store.status.browserSessionsConnected == 1 ? "session" : "sessions") connected",
+                    title: String(localized: "\(Plural.counted(Int(store.status.browserSessionsConnected), one: "managed session", other: "managed sessions")) connected"),
                     detail: "Credential operations will run inside a session the broker can verify."
                 )
             } else {

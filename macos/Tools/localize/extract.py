@@ -36,7 +36,15 @@ VIEW_CALLS = r"(?:Text|Button|Toggle|Picker|Label|SectionHeading\(title:|" \
              r"\.accessibilityValue|\.help|\.confirmationDialog)"
 VIEW_PATTERN = re.compile(VIEW_CALLS + r'\s*\(\s*"((?:[^"\\]|\\.)*)"')
 KIT_PATTERN = re.compile(r'String\(localized:\s*"((?:[^"\\]|\\.)*)"')
+# A ternary chooses between two literals — `connecting ? "Connecting" : "Not
+# reachable"`. The view patterns above only see the first argument of a call, so
+# these would otherwise ship untranslated.
+TERNARY_PATTERN = re.compile(r'\?\s*"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"')
 VERBATIM = re.compile(r'Text\(\s*verbatim:')
+
+# SF Symbol names and other identifiers: lowercase, dotted, never spaced. These
+# are asset names, not prose, and translating one would break the icon.
+SYMBOL_LIKE = re.compile(r"^[a-z0-9]+(?:[.\-][a-z0-9]+)*$")
 
 # Interpolated expressions that are plainly a count rather than a name.
 NUMERIC_HINT = re.compile(
@@ -69,16 +77,22 @@ def main() -> int:
         for line in text.splitlines():
             if VERBATIM.search(line):
                 continue
+            candidates: list[str] = []
             for pattern in (VIEW_PATTERN, KIT_PATTERN):
-                for raw in pattern.findall(line):
-                    if not raw.strip():
-                        continue
-                    # Machine tokens and format-only strings are not prose.
-                    if re.fullmatch(r"[A-Z0-9_]+", raw):
-                        continue
-                    key, ambiguous = placeholderise(raw)
-                    found.setdefault(key, set()).add(path.name)
-                    ambiguities.extend((key, item) for item in ambiguous)
+                candidates.extend(pattern.findall(line))
+            for both in TERNARY_PATTERN.findall(line):
+                candidates.extend(both)
+
+            for raw in candidates:
+                if not raw.strip():
+                    continue
+                # Machine tokens, asset names and format-only strings are not
+                # prose.
+                if re.fullmatch(r"[A-Z0-9_]+", raw) or SYMBOL_LIKE.match(raw):
+                    continue
+                key, ambiguous = placeholderise(raw)
+                found.setdefault(key, set()).add(path.name)
+                ambiguities.extend((key, item) for item in ambiguous)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT.open("w", encoding="utf-8") as handle:

@@ -91,7 +91,9 @@ struct PopoverView: View {
 
     private var pendingSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            SectionHeading(title: store.pending.count == 1 ? "Waiting for you" : "Waiting for you (\(store.pending.count))")
+            SectionHeading(title: store.pending.count == 1
+                ? String(localized: "Waiting for you")
+                : String(localized: "Waiting for you (\(store.pending.count))"))
             ForEach(store.pending) { request in
                 Button { onReview(request) } label: {
                     HStack(spacing: 8) {

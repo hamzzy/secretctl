@@ -2,7 +2,15 @@
 
 **Give AI agents access to your accounts, not your passwords.**
 
-`secretctl` is an agent credential execution and security layer. It sits between AI agents, your local credentials (macOS Keychain, Linux Secret Service, Windows Credential Manager), and the browser—allowing autonomous agents to authenticate and perform sensitive web actions without ever observing raw credentials in prompts, logs, LLM context, or tool calls.
+`secretctl` is an agent credential execution and security layer. It sits between AI agents, your local **macOS Keychain**, and **Google Chrome**—allowing autonomous agents to authenticate and perform sensitive web actions without ever observing raw credentials in prompts, logs, LLM context, or tool calls.
+
+---
+
+## Supported Environments
+
+- **Operating System**: macOS (Apple Silicon & Intel, macOS 14+) with Secure Enclave / Touch ID and native Keychain integration.
+- **Browser**: Google Chrome via Manifest V3 extension and native messaging bridge.
+- **Companion App**: Native macOS Menu Bar app (`secretctl.app`) with VoiceOver accessibility, Touch ID presence checks, and real-time approval sheets.
 
 ---
 
@@ -18,11 +26,11 @@ Traditional password managers store and retrieve secrets for humans. If an AI ag
                   │ "authenticate github-work" (JSON-RPC over agent.sock)
                   ▼
       ┌───────────────────────┐
-      │       secretctl       │
+      │  secretctl (macOS)    │
       │                       │
-      │ • Agent Verification  │
-      │ • Policy & Grants     │
-      │ • Interactive Prompt  │
+      │ • macOS Keychain Vault│
+      │ • Touch ID Presence   │
+      │ • Menu Bar Companion  │
       │ • Capability Issuance │
       │ • Origin Verification │
       │ • Tamper-Evident Logs │
@@ -173,6 +181,23 @@ main();
 | `secretctl logs [--limit N]` | Views sanitized, tamper-evident audit logs |
 | `secretctl backup --output <path>` | Creates a consistent SQLite database backup |
 | `secretctl restore --from <path>` | Restores the database from a backup snapshot |
+
+---
+
+## macOS Companion App (`secretctl.app`)
+
+`secretctl` includes a native SwiftUI companion application designed specifically for macOS:
+
+- **Menu Bar Resident**: Unobtrusive live status indicator in your menu bar displaying real-time broker protection and session count.
+- **Interactive Approval Sheets**: When an agent requests credential authorization, an approval sheet appears with verified destination origin, credential name, and sanitized request reason.
+- **Touch ID & User Presence**: High-risk actions prompt for Touch ID or Apple Watch presence before any capability is minted.
+- **VoiceOver & Accessibility**: Fully accessible with VoiceOver labels, spoken states, and keyboard navigation.
+- **Privacy & Screen Sharing Protection**: Configurable window occlusion preventing account details from showing up in screen recordings or screen sharing.
+
+To assemble the macOS `.app` bundle:
+```bash
+./macos/build-app.sh
+```
 
 ---
 
