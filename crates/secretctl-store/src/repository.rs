@@ -51,14 +51,31 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn agent_exists(&self, agent_id: &str) -> Result<bool, StoreError> {
+    pub fn agent_exists(&self, agent_id_or_name: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM agents WHERE agent_id = ?1 AND state = 'enrolled'",
-            [agent_id],
+            "SELECT COUNT(*) FROM agents WHERE (agent_id = ?1 OR display_name = ?1) AND state = 'enrolled'",
+            [agent_id_or_name],
             |row| row.get(0),
         )?;
-        Ok(count == 1)
+        Ok(count > 0)
+    }
+
+    pub fn resolve_agent_id(
+        &self,
+        agent_id_or_name: &str,
+    ) -> Result<Option<secretctl_domain::AgentId>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT agent_id FROM agents WHERE (agent_id = ?1 OR display_name = ?1) AND state = 'enrolled' LIMIT 1"
+        )?;
+        let mut rows = stmt.query([agent_id_or_name])?;
+        if let Some(row) = rows.next()? {
+            let id_str: String = row.get(0)?;
+            Ok(secretctl_domain::AgentId::parse(&id_str).ok())
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn insert_audit_event(&self, event: &AuditEvent) -> Result<(), StoreError> {

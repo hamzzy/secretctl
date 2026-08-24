@@ -114,6 +114,17 @@ impl BrokerServer {
             }
         });
 
+        let stale_state = self.state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                if let Err(error) = stale_state.expire_stale_sessions(chrono::Utc::now()) {
+                    error!("Failed to expire stale browser sessions: {}", error.message);
+                }
+            }
+        });
+
         Ok(())
     }
 }
@@ -133,9 +144,10 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
             "session.hello" => {
                 let params: SessionHelloParams =
                     serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                let resolved_agent = state.store.resolve_agent_id(&params.principal_id)?;
                 if params.protocol_version != "1.0"
                     || params.role != "agent"
-                    || !state.store.agent_exists(&params.principal_id)?
+                    || resolved_agent.is_none()
                 {
                     RpcResponse::error(
                         id,
@@ -145,7 +157,7 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
                         ),
                     )
                 } else {
-                    authenticated_agent = Some(AgentId::parse(&params.principal_id)?);
+                    authenticated_agent = resolved_agent;
                     let res = SessionHelloResult {
                         protocol_version: "1.0".to_string(),
                         server_nonce: uuid::Uuid::new_v4().to_string(),

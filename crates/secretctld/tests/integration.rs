@@ -567,3 +567,77 @@ async fn test_sensitive_form_fill_flow() {
     assert_eq!(consume_resp.fields[0].role, "recovery_code");
     assert_eq!(consume_resp.fields[0].encrypted_value, "REC-8842-9911-3320");
 }
+
+#[tokio::test]
+async fn test_stale_heartbeat_revokes_session_capabilities() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin,
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id,
+                tab_hint: Some(1),
+                reason: "heartbeat revocation".to_string(),
+                wait: true,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        broker
+            .expire_stale_sessions(Utc::now() + chrono::Duration::seconds(11))
+            .unwrap(),
+        1
+    );
+    let capabilities = broker.capabilities.lock().unwrap();
+    assert!(capabilities.values().all(|entry| {
+        entry.capability.state == secretctl_domain::CapabilityState::Revoked
+            && entry.capability.revoked_reason.as_deref() == Some("session_stale")
+    }));
+}
+
+#[tokio::test]
+async fn test_policy_reload_revokes_old_policy_capabilities() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin,
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id,
+                tab_hint: Some(1),
+                reason: "policy reload".to_string(),
+                wait: true,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    let new_policy = PolicyEvaluator::new(PolicyDocument {
+        version: "1.1".to_string(),
+        rules: vec![],
+    });
+    assert_eq!(broker.replace_policy(new_policy).unwrap(), 1);
+    let capabilities = broker.capabilities.lock().unwrap();
+    assert!(capabilities.values().all(|entry| {
+        entry.capability.state == secretctl_domain::CapabilityState::Revoked
+            && entry.capability.revoked_reason.as_deref() == Some("policy_changed")
+    }));
+}

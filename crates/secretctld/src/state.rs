@@ -562,7 +562,7 @@ impl BrokerState {
                 secretctl_capability::CapabilityError::BindingMismatch { .. } => {
                     RpcError::new(RpcErrorCode::ORIGIN_MISMATCH, "Context binding mismatch")
                 }
-                _ => RpcError::new(RpcErrorCode::SECURITY_VIOLATION, e.to_string()),
+                _ => RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "Capability rejected"),
             })?;
 
             (
@@ -780,19 +780,10 @@ impl BrokerState {
         params: ExecutorResultParams,
     ) -> Result<ExecutorResultResult, RpcError> {
         let (req_id, cap_id, cred_id, act) = {
-            let mut execs = self.executions.lock().unwrap();
-            let active = execs.get_mut(&params.execution_id).ok_or_else(|| {
+            let execs = self.executions.lock().unwrap();
+            let active = execs.get(&params.execution_id).ok_or_else(|| {
                 RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown execution ID")
             })?;
-
-            active.execution.state = if params.status == "completed" {
-                ExecutionState::Completed
-            } else {
-                ExecutionState::Failed
-            };
-            active.execution.completed_at = Some(Utc::now());
-            active.execution.result_code = Some(params.result_code.clone());
-
             (
                 active.request_id.clone(),
                 active.execution.capability_id.clone(),
@@ -827,6 +818,20 @@ impl BrokerState {
             },
         )?;
 
+        {
+            let mut execs = self.executions.lock().unwrap();
+            let active = execs.get_mut(&params.execution_id).ok_or_else(|| {
+                RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown execution ID")
+            })?;
+            active.execution.state = if params.status == "completed" {
+                ExecutionState::Completed
+            } else {
+                ExecutionState::Failed
+            };
+            active.execution.completed_at = Some(Utc::now());
+            active.execution.result_code = Some(params.result_code.clone());
+        }
+
         if let Some(request) = self.requests.write().unwrap().get_mut(&req_id) {
             request.state = if params.status == "completed" {
                 ActionRequestState::Completed
@@ -846,11 +851,100 @@ impl BrokerState {
         params: ExecutorHeartbeatParams,
     ) -> Result<ExecutorHeartbeatResult, RpcError> {
         let mut sessions = self.sessions.write().unwrap();
-        if let Some(session_entry) = sessions.get_mut(&params.browser_session_id) {
-            session_entry.session.last_heartbeat_at = Utc::now();
-            session_entry.active_tab_count = params.active_tab_count;
-            session_entry.session.state = BrowserSessionState::Active;
-        }
+        let session_entry = sessions
+            .get_mut(&params.browser_session_id)
+            .ok_or_else(|| {
+                RpcError::new(RpcErrorCode::SESSION_TERMINATED, "Unknown browser session")
+            })?;
+        session_entry.session.last_heartbeat_at = Utc::now();
+        session_entry.active_tab_count = params.active_tab_count;
+        session_entry.session.state = BrowserSessionState::Active;
         Ok(ExecutorHeartbeatResult { acknowledged: true })
+    }
+
+    pub fn expire_stale_sessions(&self, now: chrono::DateTime<Utc>) -> Result<usize, RpcError> {
+        let stale_session_ids = {
+            let mut sessions = self.sessions.write().unwrap();
+            sessions
+                .iter_mut()
+                .filter_map(|(session_id, active)| {
+                    if active.session.state == BrowserSessionState::Active
+                        && now - active.session.last_heartbeat_at >= chrono::Duration::seconds(10)
+                    {
+                        active.session.state = BrowserSessionState::Stale;
+                        Some(session_id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if stale_session_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut capabilities = self.capabilities.lock().unwrap();
+        for entry in capabilities.values_mut() {
+            if stale_session_ids.contains(&entry.capability.browser_session_id)
+                && !entry.capability.state.is_terminal()
+            {
+                entry.capability.state = secretctl_domain::CapabilityState::Revoked;
+                entry.capability.revoked_reason = Some("session_stale".to_string());
+            }
+        }
+        drop(capabilities);
+
+        for session_id in &stale_session_ids {
+            self.record_audit_event(
+                "browser.stale",
+                "broker",
+                None,
+                &AuditContext {
+                    request_id: None,
+                    credential_id: None,
+                    capability_id: None,
+                    browser_session_id: Some(session_id.to_string()),
+                    target_origin: None,
+                    action: None,
+                    decision: Some("revoke_session_capabilities".to_string()),
+                    risk_level: None,
+                    error_code: Some("SESSION_STALE".to_string()),
+                },
+            )?;
+        }
+        Ok(stale_session_ids.len())
+    }
+
+    pub fn replace_policy(&self, evaluator: PolicyEvaluator) -> Result<usize, RpcError> {
+        let new_hash = evaluator.policy_hash().to_vec();
+        *self.policy_evaluator.write().unwrap() = evaluator;
+        let mut revoked = 0;
+        let mut capabilities = self.capabilities.lock().unwrap();
+        for entry in capabilities.values_mut() {
+            if entry.capability.policy_hash != new_hash && !entry.capability.state.is_terminal() {
+                entry.capability.state = secretctl_domain::CapabilityState::Revoked;
+                entry.capability.revoked_reason = Some("policy_changed".to_string());
+                revoked += 1;
+            }
+        }
+        drop(capabilities);
+        self.record_audit_event(
+            "policy.reloaded",
+            "admin",
+            None,
+            &AuditContext {
+                request_id: None,
+                credential_id: None,
+                capability_id: None,
+                browser_session_id: None,
+                target_origin: None,
+                action: None,
+                decision: Some(format!("revoked_{revoked}")),
+                risk_level: None,
+                error_code: None,
+            },
+        )?;
+        Ok(revoked)
     }
 }

@@ -24,8 +24,25 @@ async fn main() -> anyhow::Result<()> {
     let db_path = secretctl_dir.join("secretctl.db");
     let store = SqliteStore::open(&db_path)?;
 
+    if !store.agent_exists("agent_default").unwrap_or(false) {
+        let agent_key = KeyPair::generate();
+        let default_agent = secretctl_domain::AgentPrincipal {
+            agent_id: secretctl_domain::AgentId::new(),
+            public_key: agent_key.public_key_bytes().to_vec(),
+            display_name: "agent_default".to_string(),
+            executable_hash: None,
+            state: "enrolled".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        let _ = store.insert_agent(&default_agent);
+    }
+
     let provider = Arc::new(MacOsKeychainProvider::new());
-    let broker_key = if provider.exists("installation-signing-key").await.unwrap_or(false) {
+    let broker_key = if provider
+        .exists("installation-signing-key")
+        .await
+        .unwrap_or(false)
+    {
         let secret = provider.get_secret("installation-signing-key").await?;
         KeyPair::from_bytes(secret.as_bytes())?
     } else {
