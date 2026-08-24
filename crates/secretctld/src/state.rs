@@ -2274,7 +2274,8 @@ impl BrokerState {
             .and_then(|version| version.split('.').next())
             .and_then(|major| major.parse::<u32>().ok());
         if params.extension_id != MANAGED_EXTENSION_ID
-            || params.extension_key_id != params.extension_id
+            || !params.extension_key_id.starts_with("extkey_")
+            || params.extension_key_id.len() < 24
             || params.launcher_nonce.len() < 32
             || params.launcher_nonce.len() > 256
             || params.profile_id.is_empty()
@@ -2290,8 +2291,7 @@ impl BrokerState {
         let session_id = BrowserSessionId::new();
         let mut proof_bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut proof_bytes);
-        let session_proof =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(proof_bytes);
+        let session_proof = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(proof_bytes);
         let session = BrowserSession {
             session_id: session_id.clone(),
             instance_id: params.instance_id,
@@ -2306,9 +2306,7 @@ impl BrokerState {
             ActiveBrowserSession {
                 session,
                 active_tab_count: 1,
-                session_proof_hash: Some(secretctl_crypto::sha256_digest(
-                    session_proof.as_bytes(),
-                )),
+                session_proof_hash: Some(secretctl_crypto::sha256_digest(session_proof.as_bytes())),
             },
         );
         self.record_audit_event(

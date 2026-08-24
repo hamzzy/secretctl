@@ -225,6 +225,74 @@ async fn ergonomic_authentication_resolves_exactly_one_verified_managed_page() {
 }
 
 #[tokio::test]
+async fn production_browser_session_proof_is_required_before_consume() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin: origin.clone(),
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id.clone(),
+                tab_hint: Some(1),
+                reason: "session proof regression".to_string(),
+                wait: false,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    let token = broker
+        .capabilities
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .token
+        .clone();
+    broker
+        .sessions
+        .write()
+        .unwrap()
+        .get_mut(&session_id)
+        .unwrap()
+        .session_proof_hash = Some(secretctl_crypto::sha256_digest(b"expected-proof"));
+
+    let error = broker
+        .handle_executor_consume(ExecutorConsumeParams {
+            capability_token: token,
+            session_signature: "wrong-proof".to_string(),
+            current_context: ExecutorContextPayload {
+                browser_session_id: session_id,
+                tab_id: 1,
+                frame_id: 0,
+                document_id: "doc-1".to_string(),
+                navigation_epoch: 1,
+                top_origin: origin.clone(),
+                frame_origin: origin,
+                path: "/login".to_string(),
+                path_sha256: "path-hash".to_string(),
+                tls: true,
+                incognito: false,
+            },
+        })
+        .await
+        .expect_err("wrong native session proof must fail before consume");
+    assert_eq!(
+        error.code,
+        secretctl_protocol::RpcErrorCode::SECURITY_VIOLATION.0
+    );
+    assert!(broker.executions.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn managed_registration_is_required_before_heartbeat() {
     let (broker, _, _) = setup_test_broker().await;
     let unknown = BrowserSessionId::new();
@@ -247,7 +315,7 @@ async fn managed_registration_is_required_before_heartbeat() {
             profile_id: "managed-profile".to_string(),
             extension_id: secretctl_protocol::MANAGED_EXTENSION_ID.to_string(),
             extension_version: "1.0.0".to_string(),
-            extension_key_id: secretctl_protocol::MANAGED_EXTENSION_ID.to_string(),
+            extension_key_id: "extkey_test_registration_1234".to_string(),
             browser_version: "Mozilla/5.0 Chrome/140.0.0.0".to_string(),
         })
         .expect("valid attestation");

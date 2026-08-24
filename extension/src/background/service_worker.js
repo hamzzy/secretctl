@@ -11,6 +11,13 @@ const pendingRequests = new Map();
  *  protection state from observed values like this one, never from an
  *  assumption that things are fine. */
 let executionInFlight = null;
+let pairingStatus = { paired: false, pairingCode: null, error: null };
+
+function b64urlEncode(bytes) {
+  let binary = "";
+  for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
 
 function b64urlBytes(value) {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
@@ -26,6 +33,74 @@ function canonicalOrigin(value) {
 async function sha256Hex(value) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function contextDigest(parts) {
+  const size = parts.reduce((sum, part) => sum + 8 + part.byteLength, 0);
+  const output = new Uint8Array(size);
+  const view = new DataView(output.buffer);
+  let offset = 0;
+  for (const part of parts) {
+    view.setBigUint64(offset, BigInt(part.byteLength));
+    offset += 8;
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+  return crypto.subtle.digest("SHA-256", output);
+}
+
+function enrollmentDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("secretctl-enrollment", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("keys");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+async function enrollmentKeyPair() {
+  const database = await enrollmentDatabase();
+  const existing = await new Promise((resolve, reject) => {
+    const request = database.transaction("keys").objectStore("keys").get("extension-key");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+  if (existing?.privateKey && existing?.publicKey) return existing;
+  let pair;
+  try {
+    // No exportable fallback is permitted. Chrome persists CryptoKey handles
+    // through IndexedDB without exposing the private key bytes.
+    pair = await crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]);
+  } catch (_) {
+    throw new Error("extension_key_unsupported");
+  }
+  if (pair.privateKey.extractable) throw new Error("extension_key_unsupported");
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction("keys", "readwrite");
+    transaction.objectStore("keys").put(pair, "extension-key");
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+  return pair;
+}
+
+async function extensionProof(challenge) {
+  const pair = await enrollmentKeyPair();
+  const publicKey = b64urlEncode(await crypto.subtle.exportKey("raw", pair.publicKey));
+  const encoder = new TextEncoder();
+  const transcript = await contextDigest([
+    encoder.encode("secretctl-extension-session-v1"),
+    encoder.encode(challenge.nonce),
+    encoder.encode(chrome.runtime.id),
+    encoder.encode(publicKey),
+  ]);
+  const signature = await crypto.subtle.sign("Ed25519", pair.privateKey, transcript);
+  return {
+    public_key: publicKey,
+    challenge_nonce: challenge.nonce,
+    signature: b64urlEncode(signature),
+    pairing_code: challenge.pairing_code ?? null,
+  };
 }
 
 function sendNativeRequest(method, params, timeoutMs = 15000) {
@@ -63,6 +138,13 @@ async function connectNative() {
     });
 
     const manifest = chrome.runtime.getManifest();
+    const challenge = await sendNativeRequest("extension.challenge", {});
+    const proof = await extensionProof(challenge);
+    pairingStatus = {
+      paired: Boolean(challenge.paired),
+      pairingCode: challenge.pairing_code ?? null,
+      error: null,
+    };
     const registration = await sendNativeRequest("browser.register", {
       // The native host replaces launch-controlled values from Chrome's
       // inherited environment; extension-provided placeholders are untrusted.
@@ -71,16 +153,23 @@ async function connectNative() {
       profile_id: "untrusted",
       extension_id: chrome.runtime.id,
       extension_version: manifest.version,
-      extension_key_id: chrome.runtime.id,
-      browser_version: navigator.userAgent
+      extension_key_id: "untrusted",
+      browser_version: navigator.userAgent,
+      extension_proof: proof,
     });
+    pairingStatus = { paired: true, pairingCode: null, error: null };
     browserSessionId = registration.browser_session_id;
     sessionMaterial = await crypto.subtle.importKey(
       "raw", b64urlBytes(registration.session_material), { name: "AES-GCM" }, false, ["decrypt"]
     );
     await reportPageContexts();
     schedulePoll(0);
-  } catch (_) {
+  } catch (error) {
+    pairingStatus = {
+      paired: false,
+      pairingCode: null,
+      error: error instanceof Error ? error.message : "extension_enrollment_failed",
+    };
     nativePort = null;
     setTimeout(connectNative, 2000);
   }
@@ -295,7 +384,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       origin,
       navigationEpoch: tab?.id ? tabEpochs.get(tab.id) || null : null,
       executing: Boolean(executionInFlight),
-      executingOrigin: executionInFlight?.origin ?? null
+      executingOrigin: executionInFlight?.origin ?? null,
+      paired: pairingStatus.paired,
+      pairingCode: pairingStatus.pairingCode,
+      pairingError: pairingStatus.error,
     });
   });
   return true; // response is asynchronous

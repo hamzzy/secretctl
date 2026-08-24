@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
             config.principal_id.as_str(),
             &signing_key,
             &broker_public_key,
+            dir.join("extension-enrollment.json"),
         )
         .await?;
         return Ok(());
@@ -158,10 +159,28 @@ async fn main() -> anyhow::Result<()> {
             }
             let manifest = NativeHostManifest::new(executable, &extension_id);
             let installed_at = manifest.install(None).await?;
+            let enrollment_path = dir.join("extension-enrollment.json");
+            let enrollment = if enrollment_path.exists() {
+                secretctl_protocol::from_slice_strict::<
+                    secretctl_native_host::enrollment::ExtensionEnrollment,
+                >(&tokio::fs::read(&enrollment_path).await?)?
+            } else {
+                secretctl_native_host::enrollment::ExtensionEnrollment::new(extension_id.clone())
+            };
+            tokio::fs::write(&enrollment_path, serde_json::to_vec_pretty(&enrollment)?).await?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&enrollment_path, std::fs::Permissions::from_mode(0o600))?;
+            }
             println!(
                 "Installed native messaging manifest to {}",
                 installed_at.display()
             );
+            if let Some(code) = enrollment.pending_pairing_code {
+                println!("Pairing code: {code}");
+                println!("Confirm that the extension popup shows the same code.");
+            }
         }
         None => anyhow::bail!("native host must be invoked by the enrolled Chrome extension"),
     }

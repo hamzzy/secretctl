@@ -56,6 +56,20 @@ function render(status) {
     return;
   }
 
+  if (status.pairingError) {
+    setConnection("offline");
+    body.appendChild(field("Enrollment", status.pairingError, "muted"));
+    body.appendChild(element("div", "note", "Hardened execution is disabled until extension pairing succeeds."));
+    return;
+  }
+
+  if (status.pairingCode) {
+    setConnection("unknown");
+    body.appendChild(field("Pairing code", status.pairingCode, "site"));
+    body.appendChild(element("div", "note", "Confirm that this code matches the one printed by secretctl browser install."));
+    return;
+  }
+
   if (status.executing) {
     setConnection("executing");
     body.appendChild(

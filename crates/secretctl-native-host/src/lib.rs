@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod enrollment;
 pub mod framing;
 pub mod manifest;
 

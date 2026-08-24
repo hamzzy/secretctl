@@ -1,3 +1,4 @@
+use crate::enrollment::{ExtensionChallenge, ExtensionEnrollment, ExtensionProof};
 use crate::framing::ChromeNativeMessagingCodec;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -24,6 +25,7 @@ pub async fn run_stdio_bridge(
     principal_id: &str,
     signing_key: &KeyPair,
     broker_public_key: &[u8],
+    enrollment_path: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
     info!(socket = ?executor_sock_path.as_ref(), "connecting native host to broker");
     let socket_stream = UnixStream::connect(executor_sock_path.as_ref()).await?;
@@ -116,10 +118,25 @@ pub async fn run_stdio_bridge(
     let mut chrome_source = Framed::new(stdin(), ChromeNativeMessagingCodec);
     let mut chrome_sink = Framed::new(stdout(), ChromeNativeMessagingCodec);
     let mut executor_session_proof: Option<String> = None;
+    let enrollment_path = enrollment_path.as_ref();
+    let mut enrollment: ExtensionEnrollment =
+        secretctl_protocol::from_slice_strict(&tokio::fs::read(enrollment_path).await?)?;
+    let mut extension_challenge: Option<ExtensionChallenge> = None;
     while let Some(frame) = chrome_source.next().await {
         let frame = frame?;
         let mut request: RpcRequest<serde_json::Value> =
             secretctl_protocol::from_slice_strict(&frame)?;
+        if request.method == "extension.challenge" {
+            let challenge = enrollment.challenge();
+            extension_challenge = Some(challenge.clone());
+            chrome_sink
+                .send(serde_json::to_vec(&RpcResponse::success(
+                    request.id,
+                    serde_json::to_value(challenge)?,
+                ))?)
+                .await?;
+            continue;
+        }
         if request.method == "browser.register" {
             let params = request
                 .params
@@ -144,6 +161,25 @@ pub async fn run_stdio_bridge(
                 "profile_id".to_string(),
                 serde_json::Value::String(profile_id),
             );
+            let proof: ExtensionProof = serde_json::from_value(
+                params
+                    .remove("extension_proof")
+                    .ok_or_else(|| anyhow::anyhow!("extension proof missing"))?,
+            )?;
+            let challenge = extension_challenge
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("extension challenge missing"))?;
+            let extension_key_id = enrollment.verify_and_enroll(&challenge.nonce, &proof)?;
+            params.insert(
+                "extension_key_id".to_string(),
+                serde_json::Value::String(extension_key_id),
+            );
+            tokio::fs::write(enrollment_path, serde_json::to_vec_pretty(&enrollment)?).await?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(enrollment_path, std::fs::Permissions::from_mode(0o600))?;
+            }
         } else if request.method == "executor.consume" {
             let params = request
                 .params
