@@ -11,7 +11,8 @@ pub struct MacOsKeychainProvider {
 impl MacOsKeychainProvider {
     pub fn new() -> Self {
         Self {
-            service: DEFAULT_MACOS_SERVICE.to_string(),
+            service: std::env::var("SECRETCTL_PROVIDER_SERVICE")
+                .unwrap_or_else(|_| DEFAULT_MACOS_SERVICE.to_string()),
         }
     }
 

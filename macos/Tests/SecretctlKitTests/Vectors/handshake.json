@@ -1,0 +1,193 @@
+{
+  "context_digest": {
+    "components": [
+      "secretctl-session-hello-v1",
+      "alpha",
+      "",
+      "beta"
+    ],
+    "digest_hex": "2f49085b5916fd6c8b1a671895db07097dca7722c1447da322b58526fab33c86"
+  },
+  "session_auth_transcript": {
+    "protocol_version": "1.0",
+    "role": "admin",
+    "principal_id": "local-admin",
+    "client_nonce": "Y2xpZW50LW5vbmNlLWZpeGVkLTAwMDA",
+    "server_nonce": "3f1d9c22-0000-4000-8000-000000000001",
+    "server_ephemeral_public_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+    "client_ephemeral_public_hex": "0909090909090909090909090909090909090909090909090909090909090909",
+    "digest_hex": "e8f5ad39a5ec0a1c8e8c23b94465bd92235ffa27ece9126f0184716f62bcd711"
+  },
+  "ed25519": {
+    "seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+    "public_key_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+    "message_utf8": "secretctl admin handshake vector",
+    "signature_hex": "c9519a3f75a965d839d7dff19009c8fcdc4c2551f134a8dadc29605e7900483a87365178bd1adf03b8f38774958a3e4f363f24749f75aabc6f10792fbb4bcb06"
+  },
+  "secure_channel": {
+    "shared_secret_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    "salt_utf8": "3f1d9c22-0000-4000-8000-000000000001",
+    "info_utf8": "secretctl-admin-session-v1",
+    "client_to_server": [
+      {
+        "plaintext_utf8": "first from client",
+        "frame_hex": "846e3bb68a7d40d01bcdf177bea7c990b54248b0665cdb16344e2ae31cb13ded5a"
+      },
+      {
+        "plaintext_utf8": "second from client",
+        "frame_hex": "3424a4755a126d0e32c266435c8d87e884f6b6f6f7345cb614443e87931a6dd3ee17"
+      }
+    ],
+    "server_to_client": [
+      {
+        "plaintext_utf8": "first from daemon",
+        "frame_hex": "f665e08fec71b92ef3975b2099200cfd578e4b7a86a3ddb06de9d872a52050e91e"
+      },
+      {
+        "plaintext_utf8": "second from daemon",
+        "frame_hex": "b50d4c688b355135311298555ef366961b3bbab490c71cc4bb386fca83eca158ff89"
+      }
+    ]
+  },
+  "dtos": {
+    "authorization_request": {
+      "approval_id": "apr_01",
+      "request_id": "req_01",
+      "agent_name": "Claude",
+      "agent_id": "agt_01",
+      "credential_name": "github-work",
+      "provider": "macOS Keychain",
+      "origin": "https://github.com:443",
+      "action": "authenticate.password",
+      "action_label": "Sign in",
+      "flow_steps": [
+        {
+          "role": "password",
+          "label": "Password",
+          "optional": false
+        },
+        {
+          "role": "totp",
+          "label": "TOTP",
+          "optional": true
+        }
+      ],
+      "risk": "medium",
+      "reason": "Review open pull requests",
+      "reason_source": "agent_provided",
+      "context_digest": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "expires_at": "2026-08-24T04:00:00Z",
+      "requires_presence": true,
+      "is_first_for_agent": true,
+      "grantable": true
+    },
+    "status": {
+      "protection": "sensitive_operation",
+      "pending_approvals": 1,
+      "active_operation": {
+        "request_id": "req_01",
+        "agent_name": "Claude",
+        "credential_name": "github-work",
+        "origin": "https://github.com:443",
+        "action_label": "Sign in",
+        "steps": [
+          {
+            "label": "Authorization",
+            "state": "done"
+          },
+          {
+            "label": "Password",
+            "state": "done"
+          },
+          {
+            "label": "TOTP",
+            "state": "active"
+          }
+        ],
+        "confirmed_protections": [
+          "Screenshot capture blocked",
+          "DOM extraction blocked"
+        ],
+        "protection_verified": true
+      },
+      "browser_sessions_connected": 1,
+      "agents_enrolled": 2,
+      "agents_active": 1,
+      "active_grants": 3,
+      "providers": [
+        "macOS Keychain"
+      ],
+      "policy_fingerprint": "sha256:abcd1234",
+      "audit_chain_intact": true
+    },
+    "grant": {
+      "grant_id": "gnt_01",
+      "agent_name": "Claude",
+      "credential_name": "github-work",
+      "origin": "https://github.com:443",
+      "action": "authenticate.totp",
+      "action_label": "Complete TOTP",
+      "risk_ceiling": "medium",
+      "require_presence": true,
+      "created_at": "2026-08-24T04:00:00Z",
+      "expires_at": "2026-08-24T04:00:00Z",
+      "revoked_at": null,
+      "revoked_reason": null,
+      "last_used_at": "2026-08-24T04:00:00Z",
+      "use_count": 4,
+      "active": true
+    },
+    "agent": {
+      "agent_id": "agt_01",
+      "display_name": "Claude",
+      "role": "agent",
+      "state": "enrolled",
+      "created_at": "2026-08-24T04:00:00Z",
+      "active_grants": 3,
+      "recent_event_count": 12,
+      "last_activity_at": "2026-08-24T04:00:00Z"
+    },
+    "credential": {
+      "name": "github-work",
+      "kind": "password",
+      "provider": "macOS Keychain",
+      "allowed_actions": [
+        "authenticate.password",
+        "authenticate.totp"
+      ],
+      "approved_origins": [
+        "https://github.com:443"
+      ],
+      "used_by": [
+        "Claude"
+      ],
+      "last_used_at": "2026-08-24T04:00:00Z",
+      "disabled": false
+    },
+    "browser_session": {
+      "session_id": "bsn_01",
+      "profile": "Development",
+      "state": "active",
+      "assurance": "managed",
+      "last_heartbeat_at": "2026-08-24T04:00:00Z",
+      "active_tab_count": 2,
+      "current_origins": [
+        "https://github.com:443"
+      ]
+    },
+    "activity_event": {
+      "sequence": 42,
+      "event_id": "evt_01",
+      "event_type": "execution.completed",
+      "summary": "GitHub authentication",
+      "outcome": "success",
+      "actor_type": "broker",
+      "actor_name": "Claude",
+      "origin": "https://github.com:443",
+      "action": "authenticate.password",
+      "risk": "medium",
+      "error_code": null,
+      "created_at": "2026-08-24T04:00:00Z"
+    }
+  }
+}

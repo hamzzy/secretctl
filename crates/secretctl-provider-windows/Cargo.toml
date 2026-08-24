@@ -1,0 +1,17 @@
+[package]
+name = "secretctl-provider-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+secretctl-crypto = { workspace = true }
+secretctl-providers = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }

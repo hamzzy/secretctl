@@ -14,6 +14,9 @@ pub enum GatewayError {
     #[error("Browser process terminated unexpectedly")]
     ProcessTerminated,
 
+    #[error("Private CDP transport error: {0}")]
+    Transport(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

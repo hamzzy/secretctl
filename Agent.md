@@ -6,7 +6,6 @@
 - Write commit messages in imperative mood, first line ≤ 72 chars
 - No emojis in commits
 
-
 principles.md
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
@@ -73,3 +72,5 @@ For multi-step tasks, state a brief plan:
 - In addition to check the codebase for integrations with any new code you write so you mitigate errors swiftly before I approve, also check the compact logs to see what you’ve done before now, so you are on track. Makes for good engineering.
 - Every week I will most likely ask you to export our entire conversation into a file as a log for training my own local model, and this will be updated as it goes each week. This of it as our git but for conversations where each new week has a new entry that serves as a PR for a new feature on your behavior and our interactions. This is for me to use to train my local model.
 - YOU MUST ALWAYS AIM FOR SELF IMPROVEMENT WITH EACH COMPACT. YOU MUST BE BETTER, THIS WAY YOUR PRODUCTIVITY IS STRIKING AND YOUR OUTPUT IS EXCELLENT
+
+  DO not in anyway recreate anything you can find a library  or module for

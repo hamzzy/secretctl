@@ -1,0 +1,4 @@
+target/release/secretctl usr/bin/
+target/release/secretctld usr/libexec/secretctl/
+target/release/secretctl-native-host usr/libexec/secretctl/
+packaging/linux/secretctld.service usr/lib/systemd/user/

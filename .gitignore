@@ -40,3 +40,9 @@ Thumbs.db
 *~
 secretctl-technical-prd.md
 M1-M3-COVERAGE.md
+
+# macOS menu-bar app
+macos/.build/
+macos/build/
+macos/Tools/handshake-vectors/target/
+macos/Tools/live-broker/target/

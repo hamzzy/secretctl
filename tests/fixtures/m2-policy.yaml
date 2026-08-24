@@ -1,0 +1,16 @@
+version: "1.0"
+rules:
+  - id: rule_m2_local_login
+    description: M2 local managed-browser acceptance
+    effect: allow
+    principals: ["*"]
+    credentials: ["m2-e2e-password"]
+    actions: ["authenticate.password"]
+    destinations:
+      - origin: "http://127.0.0.1:8765"
+        path_prefix: "/m2-login.html"
+    conditions:
+      browser_assurance: managed
+      require_user_presence: false
+      max_uses: 1
+      max_ttl_seconds: 30

@@ -1,0 +1,14 @@
+[package]
+name = "secretctl-provider-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+secretctl-crypto = { workspace = true }
+secretctl-providers = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+zeroize = { workspace = true }

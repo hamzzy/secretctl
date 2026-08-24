@@ -49,6 +49,8 @@ pub struct ActionResponseResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<secretctl_domain::GrantId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
 }
 
@@ -127,6 +129,14 @@ pub struct SessionAuthenticateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionAuthenticateResult {
     pub authenticated: bool,
+    pub rekey_after_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfoResult {
+    pub protocol_version: String,
+    pub principal_id: String,
+    pub role: String,
     pub rekey_after_seconds: u64,
 }
 

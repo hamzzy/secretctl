@@ -8,6 +8,8 @@ members = [
     "crates/secretctl-capability",
     "crates/secretctl-providers",
     "crates/secretctl-provider-macos",
+    "crates/secretctl-provider-windows",
+    "crates/secretctl-provider-linux",
     "crates/secretctl-audit",
     "crates/secretctl-store",
     "crates/secretctl-browser-gateway",
@@ -33,17 +35,23 @@ secretctl-policy = { path = "crates/secretctl-policy" }
 secretctl-capability = { path = "crates/secretctl-capability" }
 secretctl-providers = { path = "crates/secretctl-providers" }
 secretctl-provider-macos = { path = "crates/secretctl-provider-macos" }
+secretctl-provider-windows = { path = "crates/secretctl-provider-windows" }
+secretctl-provider-linux = { path = "crates/secretctl-provider-linux" }
 secretctl-audit = { path = "crates/secretctl-audit" }
 secretctl-store = { path = "crates/secretctl-store" }
 secretctl-browser-gateway = { path = "crates/secretctl-browser-gateway" }
 
 # Platform & Keychain
 security-framework = "3.2"
+keyring = { version = "3.6", default-features = false }
 
 # Serialization & Data Formats
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_yaml = "0.9"
+minicbor = { version = "0.26", features = ["derive", "std"] }
+command-fds = "0.3"
+os_pipe = "1.2"
 
 # Asynchronous Runtime & Networking
 tokio = { version = "1.43", features = ["full"] }
@@ -69,15 +77,17 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.13", features = ["v4", "v7", "serde"] }
 url = { version = "2.5", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Database
-rusqlite = { version = "0.33", features = ["bundled", "chrono", "uuid", "blob"] }
+rusqlite = { version = "0.33", features = ["bundled", "chrono", "uuid", "blob", "backup"] }
 
 # CLI & Utilities
 clap = { version = "4.5", features = ["derive", "env"] }
 rpassword = "7.3"
 thiserror = "2.0"
 anyhow = "1.0"
+aes-gcm = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 async-trait = "0.1"

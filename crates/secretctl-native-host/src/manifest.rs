@@ -40,9 +40,12 @@ impl NativeHostManifest {
                 .join(format!("{}.json", HOST_NAME))
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
         {
-            PathBuf::from(format!("{}.json", HOST_NAME))
+            let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(local_app_data)
+                .join("secretctl")
+                .join(format!("{}.json", HOST_NAME))
         }
     }
 

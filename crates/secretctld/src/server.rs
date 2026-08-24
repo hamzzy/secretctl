@@ -4,11 +4,15 @@ use futures::{SinkExt, StreamExt};
 use secretctl_domain::AgentId;
 use secretctl_protocol::{
     ActionCancelParams, ActionRequestParams, ActionStatusParams, AgentDisableParams,
-    ApprovalDecideParams, CapabilityListParams, CapabilityRevokeParams, ExecutorConsumeParams,
+    ApprovalDecideParams, BrowserCloseParams, BrowserLaunchParams, BrowserNavigateParams,
+    BrowserOpenTabParams, BrowserRegisterParams, BrowserSessionParams, BrowserTabParams,
+    CapabilityListParams, CapabilityRevokeParams, ExecutionNextParams, ExecutorConsumeParams,
     ExecutorHeartbeatParams, ExecutorPrepareParams, ExecutorResultParams, GrantCreateParams,
-    GrantListParams, GrantRevokeParams, LengthPrefixedCodec, PolicyReloadParams, RpcError,
-    RpcErrorCode, RpcRequest, RpcResponse, SessionAuthenticateParams, SessionAuthenticateResult,
-    SessionHelloParams, SessionHelloResult, UiActivityParams, session_auth_transcript,
+    GrantListParams, GrantRevokeParams, LengthPrefixedCodec, OAuthCallbackParams,
+    PageLocatorParams, PageTypePublicParams, PolicyReloadParams, RpcError, RpcErrorCode,
+    RpcRequest, RpcResponse, SessionAuthenticateParams, SessionAuthenticateResult,
+    SessionHelloParams, SessionHelloResult, SessionInfoResult, UiActivityParams,
+    session_auth_transcript,
 };
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
@@ -43,9 +47,14 @@ impl BrokerServer {
             std::fs::set_permissions(&self.runtime_dir, std::fs::Permissions::from_mode(0o700))?;
         }
 
-        let agent_sock_path = self.runtime_dir.join("agent.sock");
-        let executor_sock_path = self.runtime_dir.join("executor.sock");
-        let admin_sock_path = self.runtime_dir.join("admin.sock");
+        let endpoint_path =
+            |channel| match secretctl_protocol::unix_endpoint(&self.runtime_dir, channel) {
+                secretctl_protocol::LocalEndpoint::UnixSocket(path) => path,
+                secretctl_protocol::LocalEndpoint::WindowsNamedPipe(_) => unreachable!(),
+            };
+        let agent_sock_path = endpoint_path(secretctl_protocol::LocalChannel::Agent);
+        let executor_sock_path = endpoint_path(secretctl_protocol::LocalChannel::Executor);
+        let admin_sock_path = endpoint_path(secretctl_protocol::LocalChannel::Admin);
 
         let _ = tokio::fs::remove_file(&agent_sock_path).await;
         let _ = tokio::fs::remove_file(&executor_sock_path).await;
@@ -170,7 +179,8 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
         } else {
             wire_bytes
         };
-        let rpc_req: RpcRequest<serde_json::Value> = serde_json::from_slice(&msg_bytes)?;
+        let rpc_req: RpcRequest<serde_json::Value> =
+            secretctl_protocol::from_slice_strict(&msg_bytes)?;
 
         let id = rpc_req.id.clone();
         let method = rpc_req.method.as_str();
@@ -279,10 +289,52 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
                 if let Some(agent_id) = authenticated_agent.clone() {
                     let params: ActionRequestParams =
                         serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                    let should_wait = params.wait;
+                    let timeout = std::time::Duration::from_millis(params.timeout_ms);
+                    let request_id = params.request_id.clone();
                     match state.handle_action_request(agent_id, params).await {
-                        Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
+                        Ok(mut result) => {
+                            if should_wait && !result.state.is_terminal() {
+                                let deadline = tokio::time::Instant::now() + timeout;
+                                loop {
+                                    if let Some(current) =
+                                        state.requests.read().unwrap().get(&request_id).cloned()
+                                    {
+                                        result = current;
+                                        if result.state.is_terminal() {
+                                            break;
+                                        }
+                                    }
+                                    if tokio::time::Instant::now() >= deadline {
+                                        break;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                }
+                            }
+                            RpcResponse::success(id, serde_json::to_value(result)?)
+                        }
                         Err(err) => RpcResponse::error(id, err),
                     }
+                } else {
+                    RpcResponse::error(
+                        id,
+                        RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "session.hello required"),
+                    )
+                }
+            }
+            "session.info" => {
+                if let Some(agent_id) = authenticated_agent.as_ref() {
+                    RpcResponse::success(
+                        id,
+                        serde_json::to_value(SessionInfoResult {
+                            protocol_version: "1.0".to_string(),
+                            principal_id: agent_id.to_string(),
+                            role: "agent".to_string(),
+                            rekey_after_seconds: authenticated_at
+                                .map(|started| 600u64.saturating_sub(started.elapsed().as_secs()))
+                                .unwrap_or(0),
+                        })?,
+                    )
                 } else {
                     RpcResponse::error(
                         id,
@@ -318,6 +370,62 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
                         id,
                         RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "session.hello required"),
                     )
+                }
+            }
+            "browser.tabs" if authenticated_agent.is_some() => {
+                let params: BrowserSessionParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_browser_tabs(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "browser.open_tab" if authenticated_agent.is_some() => {
+                let params: BrowserOpenTabParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_browser_open_tab(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "browser.close_tab" if authenticated_agent.is_some() => {
+                let params: BrowserTabParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_browser_close_tab(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "browser.navigate" if authenticated_agent.is_some() => {
+                let params: BrowserNavigateParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_browser_navigate(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "browser.reload" if authenticated_agent.is_some() => {
+                let params: BrowserTabParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_browser_reload(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "page.click" if authenticated_agent.is_some() => {
+                let params: PageLocatorParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_page_click(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "page.type_public" if authenticated_agent.is_some() => {
+                let params: PageTypePublicParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_page_type_public(params) {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(error) => RpcResponse::error(id, error),
                 }
             }
             _ => RpcResponse::error(
@@ -388,7 +496,8 @@ async fn handle_executor_connection(stream: UnixStream, state: BrokerState) -> a
         .next()
         .await
         .ok_or_else(|| anyhow::anyhow!("executor disconnected before handshake"))??;
-    let hello_request: RpcRequest<serde_json::Value> = serde_json::from_slice(&hello_bytes)?;
+    let hello_request: RpcRequest<serde_json::Value> =
+        secretctl_protocol::from_slice_strict(&hello_bytes)?;
     anyhow::ensure!(
         hello_request.method == "session.hello",
         "session.hello required"
@@ -437,7 +546,8 @@ async fn handle_executor_connection(stream: UnixStream, state: BrokerState) -> a
         .next()
         .await
         .ok_or_else(|| anyhow::anyhow!("executor disconnected during handshake"))??;
-    let auth_request: RpcRequest<serde_json::Value> = serde_json::from_slice(&auth_bytes)?;
+    let auth_request: RpcRequest<serde_json::Value> =
+        secretctl_protocol::from_slice_strict(&auth_bytes)?;
     anyhow::ensure!(
         auth_request.method == "session.authenticate",
         "session.authenticate required"
@@ -475,12 +585,29 @@ async fn handle_executor_connection(stream: UnixStream, state: BrokerState) -> a
             "executor rekey required"
         );
         let msg_bytes = secure_channel.decrypt(&msg_res?)?;
-        let rpc_req: RpcRequest<serde_json::Value> = serde_json::from_slice(&msg_bytes)?;
+        let rpc_req: RpcRequest<serde_json::Value> =
+            secretctl_protocol::from_slice_strict(&msg_bytes)?;
 
         let id = rpc_req.id.clone();
         let method = rpc_req.method.as_str();
 
         let response: RpcResponse<serde_json::Value> = match method {
+            "browser.register" => {
+                let params: BrowserRegisterParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_browser_register(params) {
+                    Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
+                    Err(err) => RpcResponse::error(id, err),
+                }
+            }
+            "execution.next" => {
+                let params: ExecutionNextParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_execution_next(params) {
+                    Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
+                    Err(err) => RpcResponse::error(id, err),
+                }
+            }
             "executor.prepare" => {
                 let params: ExecutorPrepareParams =
                     serde_json::from_value(rpc_req.params.unwrap_or_default())?;
@@ -493,6 +620,14 @@ async fn handle_executor_connection(stream: UnixStream, state: BrokerState) -> a
                 let params: ExecutorConsumeParams =
                     serde_json::from_value(rpc_req.params.unwrap_or_default())?;
                 match state.handle_executor_consume(params).await {
+                    Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
+                    Err(err) => RpcResponse::error(id, err),
+                }
+            }
+            "oauth.callback" => {
+                let params: OAuthCallbackParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.handle_oauth_callback(params).await {
                     Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
                     Err(err) => RpcResponse::error(id, err),
                 }
@@ -546,7 +681,8 @@ async fn handle_admin_connection(stream: UnixStream, state: BrokerState) -> anyh
         .next()
         .await
         .ok_or_else(|| anyhow::anyhow!("admin disconnected before handshake"))??;
-    let hello_request: RpcRequest<serde_json::Value> = serde_json::from_slice(&hello_bytes)?;
+    let hello_request: RpcRequest<serde_json::Value> =
+        secretctl_protocol::from_slice_strict(&hello_bytes)?;
     anyhow::ensure!(
         hello_request.method == "session.hello",
         "session.hello required"
@@ -590,7 +726,8 @@ async fn handle_admin_connection(stream: UnixStream, state: BrokerState) -> anyh
         .next()
         .await
         .ok_or_else(|| anyhow::anyhow!("admin disconnected during handshake"))??;
-    let auth_request: RpcRequest<serde_json::Value> = serde_json::from_slice(&auth_bytes)?;
+    let auth_request: RpcRequest<serde_json::Value> =
+        secretctl_protocol::from_slice_strict(&auth_bytes)?;
     anyhow::ensure!(
         auth_request.method == "session.authenticate",
         "session.authenticate required"
@@ -632,11 +769,36 @@ async fn handle_admin_connection(stream: UnixStream, state: BrokerState) -> anyh
             "admin rekey required"
         );
         let msg_bytes = secure_channel.decrypt(&msg_res?)?;
-        let rpc_req: RpcRequest<serde_json::Value> = serde_json::from_slice(&msg_bytes)?;
+        let rpc_req: RpcRequest<serde_json::Value> =
+            secretctl_protocol::from_slice_strict(&msg_bytes)?;
         let id = rpc_req.id.clone();
 
         let response: RpcResponse<serde_json::Value> = match rpc_req.method.as_str() {
             "admin.ping" => RpcResponse::success(id, serde_json::json!({"status": "ok"})),
+            "browser.launch" => {
+                let params: BrowserLaunchParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.launch_managed_browser(params) {
+                    Ok(result) => RpcResponse::success(id, serde_json::to_value(result)?),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "browser.launch_status" => {
+                let params: BrowserCloseParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.browser_launch_status(&params.instance_id) {
+                    Ok(result) => RpcResponse::success(id, serde_json::to_value(result)?),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "browser.close" => {
+                let params: BrowserCloseParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.close_managed_browser(params) {
+                    Ok(()) => RpcResponse::success(id, serde_json::json!({"closed": true})),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
             "approval.list" => {
                 RpcResponse::success(id, serde_json::to_value(state.list_pending_approvals())?)
             }

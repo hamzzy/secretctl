@@ -258,4 +258,66 @@ mod tests {
         let res = verify_and_consume_capability(&mut cap, &token, &pk, &context, Utc::now());
         assert!(res.is_err());
     }
+
+    #[test]
+    fn test_verify_rejects_other_session_tab_frame_document_or_extension() {
+        let broker_key = KeyPair::generate();
+        let public_key = broker_key.public_key_bytes();
+        let origin = CanonicalOrigin::parse("https://github.com:443").unwrap();
+        let expected_session = BrowserSessionId::new();
+        let other_session = BrowserSessionId::new();
+
+        let verify_rejected =
+            |actual_session: &BrowserSessionId, extension: &str, tab, frame, document: &str| {
+                let (mut capability, token) = mint_capability(
+                    &broker_key,
+                    "key1",
+                    RequestId::new(),
+                    AgentId::new(),
+                    CredentialId::new(),
+                    ActionKind::AuthenticatePassword,
+                    origin.clone(),
+                    origin.clone(),
+                    expected_session.clone(),
+                    "ext-key-1".to_string(),
+                    42,
+                    0,
+                    "document-1".to_string(),
+                    5,
+                    RecipeId::parse("rcp_login").unwrap(),
+                    vec![1, 2, 3],
+                    vec![4, 5, 6],
+                    Utc::now(),
+                    30,
+                    1,
+                );
+                let context = ExecutionContextSnapshot {
+                    top_origin: &origin,
+                    frame_origin: &origin,
+                    browser_session_id: actual_session,
+                    extension_key_id: extension,
+                    tab_id: tab,
+                    frame_id: frame,
+                    document_id: document,
+                    navigation_epoch: 5,
+                };
+                assert!(
+                    verify_and_consume_capability(
+                        &mut capability,
+                        &token,
+                        &public_key,
+                        &context,
+                        Utc::now(),
+                    )
+                    .is_err()
+                );
+                assert_eq!(capability.used_count, 0);
+            };
+
+        verify_rejected(&other_session, "ext-key-1", 42, 0, "document-1");
+        verify_rejected(&expected_session, "ext-key-2", 42, 0, "document-1");
+        verify_rejected(&expected_session, "ext-key-1", 43, 0, "document-1");
+        verify_rejected(&expected_session, "ext-key-1", 42, 1, "document-1");
+        verify_rejected(&expected_session, "ext-key-1", 42, 0, "document-2");
+    }
 }

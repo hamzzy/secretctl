@@ -23,16 +23,18 @@ const PROHIBITED_CDP_METHODS: &[&str] = &[
     "Browser.getBrowserCommandLine",
     "Browser.setDownloadBehavior",
     "Page.setDownloadBehavior",
-    "Target.attachToTarget",
 ];
 
 const ALLOWED_CDP_METHODS: &[&str] = &[
     "Browser.getVersion",
+    "Extensions.getExtensions",
+    "Extensions.loadUnpacked",
     "DOM.describeNode",
     "DOM.getBoxModel",
     "DOM.getDocument",
     "DOM.querySelector",
     "DOM.querySelectorAll",
+    "DOM.focus",
     "Input.dispatchKeyEvent",
     "Input.dispatchMouseEvent",
     "Input.insertText",
@@ -45,6 +47,7 @@ const ALLOWED_CDP_METHODS: &[&str] = &[
     "Target.closeTarget",
     "Target.createTarget",
     "Target.getTargets",
+    "Target.attachToTarget",
 ];
 
 const SENSITIVE_WINDOW_BLOCKED_METHODS: &[&str] = &[
@@ -91,6 +94,10 @@ impl CdpFilter {
         tabs.contains(&tab_id)
     }
 
+    pub fn has_sensitive_window(&self) -> bool {
+        !self.active_sensitive_tabs.read().unwrap().is_empty()
+    }
+
     pub fn validate_cdp_command(
         &self,
         method: &str,
@@ -120,15 +127,15 @@ impl CdpFilter {
         }
 
         // 2. Check sensitive window restrictions
-        if let Some(tid) = tab_id {
-            if self.is_tab_in_sensitive_window(tid) {
-                for &blocked in SENSITIVE_WINDOW_BLOCKED_METHODS {
-                    if method == blocked {
-                        return Err(GatewayError::SensitiveWindowBlocked(format!(
-                            "CDP method '{}' is blocked during active authentication window on tab {}",
-                            method, tid
-                        )));
-                    }
+        if tab_id.is_some_and(|tid| self.is_tab_in_sensitive_window(tid))
+            || (tab_id.is_none() && self.has_sensitive_window())
+        {
+            for &blocked in SENSITIVE_WINDOW_BLOCKED_METHODS {
+                if method == blocked {
+                    return Err(GatewayError::SensitiveWindowBlocked(format!(
+                        "CDP method '{}' is blocked during an active authentication window",
+                        method
+                    )));
                 }
             }
         }

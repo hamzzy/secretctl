@@ -84,10 +84,91 @@ pub struct SiteRecipe {
     pub fields: Vec<RecipeField>,
     pub submit: Option<RecipeSubmit>,
     pub success_indicators: Option<RecipeSuccessIndicators>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthRecipe>,
     #[serde(skip, default)]
     pub content_hash: Vec<u8>,
     #[serde(skip, default = "default_recipe_enabled")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthRecipe {
+    pub issuer: CanonicalOrigin,
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub allowed_scopes: Vec<String>,
+}
+
+impl OAuthRecipe {
+    /// Validate the portions of the OAuth configuration that are security
+    /// invariants before any navigation or token exchange is attempted.
+    pub fn validate(&self) -> Result<(), crate::DomainError> {
+        let parse_endpoint = |value: &str| {
+            let url = url::Url::parse(value).map_err(|_| {
+                crate::DomainError::SecurityInvariantViolation("OAuth URL is invalid".into())
+            })?;
+            if url.scheme() != "https"
+                || url.username() != ""
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(crate::DomainError::SecurityInvariantViolation(
+                    "OAuth endpoints must be HTTPS URLs without credentials, query, or fragment"
+                        .into(),
+                ));
+            }
+            Ok(url)
+        };
+        let authorization = parse_endpoint(&self.authorization_endpoint)?;
+        let token = parse_endpoint(&self.token_endpoint)?;
+        let authorization_origin = CanonicalOrigin::parse(
+            authorization.origin().ascii_serialization().as_str(),
+        )
+        .map_err(|_| {
+            crate::DomainError::SecurityInvariantViolation("OAuth issuer is invalid".into())
+        })?;
+        let token_origin = CanonicalOrigin::parse(token.origin().ascii_serialization().as_str())
+            .map_err(|_| {
+                crate::DomainError::SecurityInvariantViolation("OAuth issuer is invalid".into())
+            })?;
+        if !authorization_origin.matches(&self.issuer) || !token_origin.matches(&self.issuer) {
+            return Err(crate::DomainError::SecurityInvariantViolation(
+                "OAuth endpoints must match the configured issuer".into(),
+            ));
+        }
+        let redirect = url::Url::parse(&self.redirect_uri).map_err(|_| {
+            crate::DomainError::SecurityInvariantViolation("OAuth redirect URI is invalid".into())
+        })?;
+        if redirect.scheme() != "https"
+            || redirect.username() != ""
+            || redirect.password().is_some()
+            || redirect.query().is_some()
+            || redirect.fragment().is_some()
+        {
+            return Err(crate::DomainError::SecurityInvariantViolation(
+                "OAuth redirect must be an exact HTTPS origin/path".into(),
+            ));
+        }
+        if self.client_id.trim().is_empty() || self.allowed_scopes.is_empty() {
+            return Err(crate::DomainError::SecurityInvariantViolation(
+                "OAuth client ID and scopes are required".into(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if self.allowed_scopes.iter().any(|scope| {
+            scope.is_empty() || scope.chars().any(char::is_whitespace) || !seen.insert(scope)
+        }) {
+            return Err(crate::DomainError::SecurityInvariantViolation(
+                "OAuth scopes must be unique non-empty names".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn default_recipe_enabled() -> bool {
@@ -332,6 +413,29 @@ mod recipe_tests {
         }));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn oauth_recipe_requires_exact_https_issuer_and_scopes() {
+        let recipe = OAuthRecipe {
+            issuer: CanonicalOrigin::parse("https://idp.example").unwrap(),
+            authorization_endpoint: "https://idp.example/authorize".into(),
+            token_endpoint: "https://idp.example/token".into(),
+            client_id: "client-1".into(),
+            redirect_uri: "https://app.example/oauth/callback".into(),
+            allowed_scopes: vec!["openid".into(), "profile".into()],
+        };
+        recipe.validate().unwrap();
+
+        let mut invalid = recipe.clone();
+        invalid.authorization_endpoint = "http://idp.example/authorize".into();
+        assert!(invalid.validate().is_err());
+        invalid = recipe.clone();
+        invalid.allowed_scopes.push("openid".into());
+        assert!(invalid.validate().is_err());
+        invalid = recipe;
+        invalid.token_endpoint = "https://other.example/token".into();
+        assert!(invalid.validate().is_err());
     }
 }
 

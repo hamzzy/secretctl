@@ -132,9 +132,18 @@ setInterval(async () => {
       active_tab_count: tabs.length,
       timestamp: new Date().toISOString()
     });
-    await reportPageContexts();
   } catch (_) { /* disconnect handler owns reconnection */ }
 }, 5000);
+
+// Authorization accepts only a very recent browser-measured context. Refresh
+// independently of the five-second liveness heartbeat so a request cannot race
+// against an otherwise healthy but older measurement.
+setInterval(async () => {
+  if (!browserSessionId || !nativePort) return;
+  try {
+    await reportPageContexts();
+  } catch (_) { /* disconnect handler owns reconnection */ }
+}, 1000);
 
 function schedulePoll(delay = 250) {
   clearTimeout(pollTimer);
@@ -165,6 +174,7 @@ async function executeOffer(offer) {
 }
 
 async function runOffer(offer) {
+  if (offer.oauth) return runOAuthOffer(offer);
   const context = await measureContext(offer.tab_id, offer.frame_id);
   if (context.document_id !== offer.document_id ||
       context.navigation_epoch !== offer.navigation_epoch ||
@@ -200,12 +210,54 @@ async function runOffer(offer) {
       preflightNonce: preflight.preflight_nonce,
       fields: envelope.fields,
       submitSelector: offer.auto_submit_selector,
+      success: offer.success,
       executionId: consumed.execution_id,
       expectedOrigin: offer.frame_origin
     },
     { frameId: offer.frame_id }
   );
   await sendNativeRequest("executor.result", executionResult);
+}
+
+async function runOAuthOffer(offer) {
+  const plan = offer.oauth;
+  const issuerOrigin = canonicalOrigin(plan.issuer_origin);
+  const redirect = new URL(plan.redirect_uri);
+  const redirectOrigin = canonicalOrigin(redirect.href);
+  const callbackUri = await new Promise(async (resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error("OAUTH_CALLBACK_TIMEOUT")), 120000);
+    function finish(error, value) {
+      clearTimeout(timeout);
+      chrome.webNavigation.onCommitted.removeListener(onCommitted);
+      error ? reject(error) : resolve(value);
+    }
+    function onCommitted(details) {
+      if (details.tabId !== offer.tab_id || details.frameId !== 0) return;
+      try {
+        const observed = new URL(details.url);
+        const observedOrigin = canonicalOrigin(observed.href);
+        if (observedOrigin === redirectOrigin && observed.pathname === redirect.pathname) {
+          finish(null, details.url);
+        } else if (observedOrigin !== issuerOrigin) {
+          finish(new Error("OAUTH_REDIRECT_MISMATCH"));
+        }
+      } catch (_) {
+        finish(new Error("OAUTH_REDIRECT_MISMATCH"));
+      }
+    }
+    chrome.webNavigation.onCommitted.addListener(onCommitted);
+    try {
+      await chrome.tabs.update(offer.tab_id, { url: plan.authorization_url });
+    } catch (_) {
+      finish(new Error("OAUTH_NAVIGATION_FAILED"));
+    }
+  });
+  await sendNativeRequest("oauth.callback", {
+    capability_token: offer.capability_token,
+    browser_session_id: browserSessionId,
+    tab_id: offer.tab_id,
+    callback_uri: callbackUri
+  }, 30000);
 }
 
 async function pollExecution() {

@@ -24,6 +24,11 @@ impl TotpGenerator {
         }
     }
 
+    pub fn with_period_seconds(mut self, period_seconds: u64) -> Self {
+        self.period_seconds = period_seconds;
+        self
+    }
+
     pub fn compute_time_step(&self, unix_time_seconds: u64) -> (u64, u64) {
         let time_step = unix_time_seconds / self.period_seconds;
         let seconds_remaining = self.period_seconds - (unix_time_seconds % self.period_seconds);
@@ -83,7 +88,13 @@ mod tests {
         // Test at t = 30s (time_step = 1, seconds_remaining = 30) -> should produce 6-digit code
         let (code, time_step) = generator.generate(seed, 30).unwrap();
         assert_eq!(time_step, 1);
-        assert_eq!(code.len(), 6);
+        assert_eq!(code, "287082");
         assert!(code.chars().all(|c| c.is_ascii_digit()));
+
+        // RFC 6238's next SHA-1 vector (T=59) is intentionally rejected by
+        // the two-second safety margin, while the following step is valid.
+        let (next_code, next_step) = generator.generate(seed, 60).unwrap();
+        assert_eq!(next_step, 2);
+        assert_eq!(next_code, "359152");
     }
 }

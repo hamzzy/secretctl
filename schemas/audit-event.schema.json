@@ -15,7 +15,12 @@
         "action.requested",
         "policy.evaluated",
         "approval.challenged",
+        "approval.requested",
         "approval.decided",
+        "approval.approved",
+        "approval.denied",
+        "approval.expired",
+        "approval.invalidated",
         "capability.minted",
         "capability.consumed",
         "capability.revoked",
@@ -24,29 +29,22 @@
         "executor.started",
         "executor.completed",
         "executor.failed",
+        "execution.completed",
+        "execution.failed",
+        "secret.retrieve_succeeded",
+        "policy.reloaded",
+        "browser.stale",
+        "audit.checkpoint",
         "session.invalidated",
         "security.violation"
       ]
     },
     "actor_type": { "type": "string", "enum": ["agent", "user", "broker", "executor"] },
     "actor_id": { "type": ["string", "null"] },
-    "context": {
-      "type": "object",
-      "properties": {
-        "request_id": { "type": "string" },
-        "credential_id": { "type": "string" },
-        "capability_id": { "type": "string" },
-        "browser_session_id": { "type": "string" },
-        "target_origin": { "type": "string" },
-        "action": { "type": "string" },
-        "decision": { "type": "string" },
-        "risk_level": { "type": "string" },
-        "error_code": { "type": "string" }
-      },
-      "additionalProperties": false
-    },
-    "previous_hash": { "type": "string", "description": "Hex-encoded SHA-256 hash of previous audit event" },
-    "event_hash": { "type": "string", "description": "Hex-encoded SHA-256 hash of current audit event" },
+    "event_json": { "type": "string", "description": "Canonical JSON audit context; prohibited secret-bearing keys are rejected before storage" },
+    "audit_key_version": { "type": "integer", "minimum": 1 },
+    "previous_hash": { "type": "string", "description": "Encoded HMAC-SHA-256 hash of previous audit event" },
+    "event_hash": { "type": "string", "description": "Encoded HMAC-SHA-256 hash of current audit event" },
     "created_at": { "type": "string", "format": "date-time" }
   },
   "required": [
@@ -54,7 +52,8 @@
     "event_id",
     "event_type",
     "actor_type",
-    "context",
+    "event_json",
+    "audit_key_version",
     "previous_hash",
     "event_hash",
     "created_at"

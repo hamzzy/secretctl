@@ -20,7 +20,13 @@ use secretctld::state::BrokerState;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-async fn setup_adversarial_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin, AgentId) {
+async fn setup_adversarial_broker() -> (
+    BrokerState,
+    BrowserSessionId,
+    CanonicalOrigin,
+    AgentId,
+    Arc<MemorySecretProvider>,
+) {
     let broker_key = KeyPair::generate();
     let store = SqliteStore::in_memory().expect("in-memory db");
     let provider = Arc::new(MemorySecretProvider::new());
@@ -85,7 +91,7 @@ async fn setup_adversarial_broker() -> (BrokerState, BrowserSessionId, Canonical
     };
     let evaluator = PolicyEvaluator::new(policy_doc);
 
-    let state = BrokerState::new(broker_key, "key-test-1", store, provider, evaluator);
+    let state = BrokerState::new(broker_key, "key-test-1", store, provider.clone(), evaluator);
 
     let recipe = SiteRecipe {
         recipe_id: RecipeId::parse("rcp_github_login").unwrap(),
@@ -105,6 +111,7 @@ async fn setup_adversarial_broker() -> (BrokerState, BrowserSessionId, Canonical
         }],
         submit: None,
         success_indicators: None,
+        oauth: None,
         content_hash: vec![1, 2, 3],
         enabled: true,
     };
@@ -138,12 +145,12 @@ async fn setup_adversarial_broker() -> (BrokerState, BrowserSessionId, Canonical
         session_id.clone(),
     );
 
-    (state, session_id, origin, agent_id)
+    (state, session_id, origin, agent_id, provider)
 }
 
 #[tokio::test]
 async fn test_attack_1_malicious_origin_spoofing_denied() {
-    let (broker, session_id, _, agent_id) = setup_adversarial_broker().await;
+    let (broker, session_id, _, agent_id, provider) = setup_adversarial_broker().await;
     let evil_origin = CanonicalOrigin::parse("https://evil.example:443").unwrap();
 
     // Attacker tab navigated to evil.example
@@ -189,11 +196,12 @@ async fn test_attack_1_malicious_origin_spoofing_denied() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code, RpcErrorCode::AUTH_POLICY_DENIED.0);
+    assert_eq!(provider.retrieval_count(), 0);
 }
 
 #[tokio::test]
 async fn test_attack_2_navigation_epoch_tamper_fails_closed() {
-    let (broker, session_id, origin, agent_id) = setup_adversarial_broker().await;
+    let (broker, session_id, origin, agent_id, _) = setup_adversarial_broker().await;
 
     broker
         .handle_action_request(
@@ -252,7 +260,7 @@ async fn test_attack_2_navigation_epoch_tamper_fails_closed() {
 
 #[tokio::test]
 async fn test_attack_3_capability_double_consume_and_replay_prevented() {
-    let (broker, session_id, origin, agent_id) = setup_adversarial_broker().await;
+    let (broker, session_id, origin, agent_id, _) = setup_adversarial_broker().await;
 
     let page_context = ExecutorContextPayload {
         browser_session_id: session_id.clone(),
@@ -366,7 +374,7 @@ fn test_attack_4_cdp_side_channel_denials_during_sensitive_window() {
 
 #[tokio::test]
 async fn test_attack_5_stale_heartbeat_revokes_active_capabilities() {
-    let (broker, session_id, origin, agent_id) = setup_adversarial_broker().await;
+    let (broker, session_id, origin, agent_id, _) = setup_adversarial_broker().await;
 
     broker
         .handle_action_request(

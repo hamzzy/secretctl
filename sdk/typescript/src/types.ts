@@ -21,19 +21,28 @@ export type SecretCtlErrorCode =
   | "SESSION_TERMINATED"
   | "EXECUTOR_FAILED"
   | "RECIPE_NOT_FOUND"
+  | "USER_PRESENCE_UNAVAILABLE"
   | "SECURITY_VIOLATION"
   | "INTERNAL_ERROR";
 
 export interface ConnectOptions {
-  principalId: string;
+  principalId?: string;
   socketPath?: string;
   brokerPublicKeyPath?: string;
+  signingKeyPath?: string;
 }
 
 export interface ActionStatus {
   requestId: string;
   state: string;
   detail?: string;
+}
+
+export interface SessionInfo {
+  protocolVersion: string;
+  principalId: string;
+  role: "agent";
+  rekeyAfterSeconds: number;
 }
 
 export interface TargetConstraint {
@@ -69,10 +78,11 @@ export type ExecuteResult =
       verifiedOrigin: string;
       browserSessionId: string;
       evidenceId?: string;
+      grantId?: string;
       completedAt?: string;
     }
   | {
-      status: "denied" | "expired" | "cancelled" | "failed";
+      status: "denied" | "expired" | "cancelled" | "indeterminate" | "revoked" | "failed";
       requestId: string;
       code: SecretCtlErrorCode;
       safeMessage: string;

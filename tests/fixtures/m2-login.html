@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>secretctl M2 login fixture</title>
+<form id="login" action="http://127.0.0.1:8765/login">
+  <label>Password <input id="password" name="password" type="password" autocomplete="current-password"></label>
+  <button id="submit" type="submit">Sign in</button>
+</form>
+<p id="result" hidden>authenticated</p>
+<script>
+  const mode = new URLSearchParams(location.search).get("case");
+  const password = document.querySelector("#password");
+  if (mode === "hidden") {
+    password.hidden = true;
+  } else if (mode === "duplicate") {
+    password.after(password.cloneNode());
+  } else if (mode === "overlay") {
+    const rect = password.getBoundingClientRect();
+    const overlay = document.createElement("div");
+    Object.assign(overlay.style, {
+      position: "fixed",
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      zIndex: "2147483647",
+      background: "transparent",
+    });
+    document.body.append(overlay);
+  } else if (mode === "replaced") {
+    setInterval(() => {
+      const current = document.querySelector("#password");
+      current.replaceWith(current.cloneNode());
+    }, 10);
+  }
+  document.querySelector("#login").addEventListener("submit", (event) => {
+    event.preventDefault();
+    document.querySelector("#result").hidden = false;
+  });
+</script>

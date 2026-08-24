@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>secretctl</string>
+    <key>CFBundleDisplayName</key>
+    <string>secretctl</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.secretctl.menubar</string>
+    <key>CFBundleExecutable</key>
+    <string>secretctl-menubar</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>secretctl</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <!-- A menu-bar utility: no Dock icon, no window at launch. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Apache-2.0</string>
+    <!-- Shown when the app asks for Touch ID before an authorization. -->
+    <key>NSFaceIDUsageDescription</key>
+    <string>secretctl confirms you are present before authorizing a sensitive credential operation.</string>
+</dict>
+</plist>

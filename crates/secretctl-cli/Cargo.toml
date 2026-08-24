@@ -17,6 +17,8 @@ secretctl-crypto = { workspace = true }
 secretctl-policy = { workspace = true }
 secretctl-providers = { workspace = true }
 secretctl-provider-macos = { workspace = true }
+secretctl-provider-windows = { workspace = true }
+secretctl-provider-linux = { workspace = true }
 secretctl-audit = { workspace = true }
 secretctl-store = { workspace = true }
 serde = { workspace = true }

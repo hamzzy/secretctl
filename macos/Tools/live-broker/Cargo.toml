@@ -1,0 +1,22 @@
+# Standalone on purpose: an empty [workspace] table keeps this fixture out of
+# the main workspace so it never perturbs the daemon's build graph.
+[workspace]
+
+[package]
+name = "live-broker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+secretctld = { path = "../../../crates/secretctld" }
+secretctl-domain = { path = "../../../crates/secretctl-domain" }
+secretctl-protocol = { path = "../../../crates/secretctl-protocol" }
+secretctl-crypto = { path = "../../../crates/secretctl-crypto" }
+secretctl-policy = { path = "../../../crates/secretctl-policy" }
+secretctl-providers = { path = "../../../crates/secretctl-providers" }
+secretctl-store = { path = "../../../crates/secretctl-store" }
+tokio = { version = "1.43", features = ["full"] }
+chrono = "0.4"
+serde_json = "1.0"
+hex = "0.4"
+anyhow = "1.0"

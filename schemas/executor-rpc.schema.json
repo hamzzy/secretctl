@@ -5,12 +5,54 @@
   "description": "Executor-facing JSON-RPC 2.0 messages for browser runtime interaction.",
   "type": "object",
   "oneOf": [
+    { "$ref": "#/$defs/BrowserRegister" },
+    { "$ref": "#/$defs/ExecutionNext" },
     { "$ref": "#/$defs/ExecutorPrepare" },
     { "$ref": "#/$defs/ExecutorConsume" },
     { "$ref": "#/$defs/ExecutorResult" },
     { "$ref": "#/$defs/ExecutorHeartbeat" }
   ],
   "$defs": {
+    "BrowserRegister": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "browser.register" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "instance_id": { "type": "string" },
+            "launcher_nonce": { "type": "string", "minLength": 32, "maxLength": 256 },
+            "profile_id": { "type": "string", "minLength": 1 },
+            "extension_id": { "const": "kepjngjifdbhbohpljaehekkkjdpecli" },
+            "extension_version": { "type": "string", "minLength": 1 },
+            "extension_key_id": { "const": "kepjngjifdbhbohpljaehekkkjdpecli" },
+            "browser_version": { "type": "string", "minLength": 1 }
+          },
+          "required": ["instance_id", "launcher_nonce", "profile_id", "extension_id", "extension_version", "extension_key_id", "browser_version"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
+    "ExecutionNext": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string" },
+        "method": { "const": "execution.next" },
+        "params": {
+          "type": "object",
+          "properties": { "browser_session_id": { "type": "string" } },
+          "required": ["browser_session_id"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false
+    },
     "ExecutorContext": {
       "type": "object",
       "properties": {

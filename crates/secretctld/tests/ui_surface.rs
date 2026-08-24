@@ -132,6 +132,7 @@ async fn setup(require_presence: bool, risk: RiskLevel) -> Harness {
         ],
         submit: None,
         success_indicators: None,
+        oauth: None,
         content_hash: vec![1, 2, 3],
         enabled: true,
     });
@@ -202,7 +203,11 @@ async fn pending_request_carries_everything_a_human_needs_to_decide() {
     request_authentication(&harness, "Review open pull requests").await;
 
     let pending = harness.broker.ui_pending_approvals().expect("projected");
-    assert_eq!(pending.len(), 1, "one request should be awaiting a decision");
+    assert_eq!(
+        pending.len(),
+        1,
+        "one request should be awaiting a decision"
+    );
     let request = &pending[0];
 
     // Broker-verified identity, not what the agent claimed.
@@ -357,7 +362,10 @@ async fn a_grant_cannot_be_created_without_verified_presence_when_policy_demands
             presence_verified: false,
         })
         .expect_err("presence is required");
-    assert_eq!(error.code, secretctl_protocol::RpcErrorCode::APPROVAL_REJECTED.0);
+    assert_eq!(
+        error.code,
+        secretctl_protocol::RpcErrorCode::APPROVAL_REJECTED.0
+    );
 
     // Nothing was created, and the request is still awaiting a decision.
     assert!(harness.broker.ui_grants(true).unwrap().is_empty());

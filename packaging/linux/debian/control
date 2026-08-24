@@ -1,0 +1,10 @@
+Package: secretctl
+Version: 0.1.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: libsecret-1-0, libsecret-tools, dbus-user-session
+Maintainer: secretctl contributors
+Description: Local credential isolation broker for agent authentication
+ Linux support is restricted to low and medium risk actions. An unlocked
+ Secret Service session is required; plaintext fallback is never used.

@@ -48,6 +48,7 @@ impl RpcErrorCode {
     pub const SESSION_TERMINATED: RpcErrorCode = RpcErrorCode(-32009);
     pub const EXECUTOR_FAILED: RpcErrorCode = RpcErrorCode(-32010);
     pub const RECIPE_NOT_FOUND: RpcErrorCode = RpcErrorCode(-32011);
+    pub const USER_PRESENCE_UNAVAILABLE: RpcErrorCode = RpcErrorCode(-32012);
     pub const SECURITY_VIOLATION: RpcErrorCode = RpcErrorCode(-32099);
 }
 

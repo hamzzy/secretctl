@@ -13,7 +13,38 @@
 //! `admin_dto_tests` asserts that mechanically.
 
 use secretctl_domain::{ActionKind, ApprovalId, CapabilityId, RiskLevel};
+use secretctl_domain::{BrowserInstanceId, BrowserSessionId};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserLaunchParams {
+    pub chrome_binary: PathBuf,
+    pub extension_path: PathBuf,
+    pub native_host_binary: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub headless: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserLaunchResult {
+    pub instance_id: BrowserInstanceId,
+    pub profile_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_session_id: Option<BrowserSessionId>,
+    pub gateway_endpoint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserCloseParams {
+    pub instance_id: BrowserInstanceId,
+}
 
 /// Whether a string shown in the UI was produced by the broker or supplied by
 /// the requesting agent.

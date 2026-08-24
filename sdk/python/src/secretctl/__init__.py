@@ -1,5 +1,5 @@
 from .client import AsyncSecretCtl, SecretCtl
-from .types import ActionStatus, ExecuteRequest, ExecuteResult, Target, SecretAction
+from .types import ActionStatus, ExecuteRequest, ExecuteResult, SessionInfo, Target, SecretAction
 
 __all__ = [
     "ActionStatus",
@@ -7,6 +7,7 @@ __all__ = [
     "SecretCtl",
     "ExecuteRequest",
     "ExecuteResult",
+    "SessionInfo",
     "Target",
     "SecretAction",
 ]

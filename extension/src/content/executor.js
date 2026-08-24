@@ -21,6 +21,15 @@ function verifyField(field, expectedOrigin) {
       (!(element instanceof HTMLInputElement) || element.type.toLowerCase() !== "password")) {
     throw new Error("FIELD_TYPE_MISMATCH");
   }
+  if (["totp", "totp_code"].includes(field.role)) {
+    if (!(element instanceof HTMLInputElement) ||
+        !["text", "tel", "number"].includes(element.type.toLowerCase())) {
+      throw new Error("FIELD_TYPE_MISMATCH");
+    }
+    if (document.querySelectorAll('input[autocomplete="one-time-code"]').length > 1) {
+      throw new Error("FIELD_AMBIGUOUS");
+    }
+  }
   const rect = element.getBoundingClientRect();
   const style = getComputedStyle(element);
   if (rect.width < 10 || rect.height < 10 || rect.bottom <= 0 || rect.right <= 0 ||
@@ -57,13 +66,27 @@ function preflight(fields, expectedOrigin, expectedDocumentId) {
     fields: structuredClone(fields),
     elements,
     expectedOrigin,
-    expiresAt: Date.now() + 3000
+    expiresAt: Date.now() + 30000
   });
-  setTimeout(() => prepared.delete(nonce), 3000);
+  setTimeout(() => prepared.delete(nonce), 30000);
   return { preflight_nonce: nonce, fields_verified_count: elements.filter(Boolean).length };
 }
 
-function commit(preflightNonce, fields, submitSelector, expectedOrigin) {
+async function waitForSuccess(success) {
+  if (!success) return false;
+  const deadline = Date.now() + Math.min(success.timeout_ms || 5000, 30000);
+  while (Date.now() < deadline) {
+    const present = !success.selector_present || Boolean(document.querySelector(success.selector_present));
+    const absent = !success.selector_absent || !document.querySelector(success.selector_absent);
+    const origin = !success.navigation_origin ||
+      canonicalOrigin(location.href) === canonicalOrigin(success.navigation_origin);
+    if (present && absent && origin) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+async function commit(preflightNonce, fields, submitSelector, expectedOrigin, success) {
   const plan = prepared.get(preflightNonce);
   prepared.delete(preflightNonce);
   if (!plan || plan.expiresAt < Date.now() || canonicalOrigin(location.href) !== expectedOrigin ||
@@ -93,10 +116,18 @@ function commit(preflightNonce, fields, submitSelector, expectedOrigin) {
       buttons[0].click();
       submitted = true;
     }
+    const outcome = await waitForSuccess(success);
+    if (success && !outcome) throw new Error("OUTCOME_UNVERIFIED");
+    // The authorized page observes values synchronously during submit. Once
+    // success is proven in the same document, erase every sensitive field so
+    // later page or automation reads cannot recover it.
+    for (const element of filled) {
+      if (element.isConnected) injectValue(element, "");
+    }
     return {
       submitted,
       fields_filled_count: filled.length,
-      outcome_selector_matched: true
+      outcome_selector_matched: outcome
     };
   } catch (error) {
     for (const element of filled) injectValue(element, "");
@@ -122,26 +153,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
   if (message.type === "SECRETCTL_COMMIT") {
-    try {
-      const evidence = commit(
+    commit(
         message.preflightNonce,
         message.fields,
         message.submitSelector,
-        message.expectedOrigin
-      );
-      sendResponse({
+        message.expectedOrigin,
+        message.success
+      ).then((evidence) => sendResponse({
         execution_id: message.executionId,
         status: "completed",
         result_code: "SUCCESS",
         evidence
-      });
-    } catch (_) {
-      sendResponse({
+      })).catch(() => sendResponse({
         execution_id: message.executionId,
         status: "failed",
-        result_code: "COMMIT_FAILED",
+        result_code: "OUTCOME_UNVERIFIED",
         evidence: null
-      });
-    }
+      }));
+    return true;
   }
 });

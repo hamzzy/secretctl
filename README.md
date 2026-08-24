@@ -116,17 +116,6 @@ cargo test --workspace
 
 ---
 
-## Milestones & Roadmap
-
-- [x] **M0: Foundations & Core Crates** — Domain models, protocol framing, crypto primitives, policy evaluator, capability minting, hash-chained audit, and store migrations.
-- [ ] **M1: Broker Daemon, CLI, macOS Keychain & Audit** — Daemon lifecycle, Unix IPC sockets, macOS Keychain provider, CLI subcommands, and fake executor integration.
-- [ ] **M2: Managed Chromium & Password Action** — Browser launcher, private CDP proxy, Native Host, and Chrome MV3 extension.
-- [ ] **M3: TypeScript & Python SDKs, MCP Adapter, TOTP & Sensitive Forms** — Client SDKs, Model Context Protocol server, and multi-factor auth.
-- [ ] **M4: OAuth PKCE & Cross-Platform Support** — OAuth authorization flow, Windows Credential Manager, and Linux Secret Service.
-- [ ] **M5: Hardened v1 Release** — End-to-end security review, telemetry, and release packaging.
-
----
-
 ## License
 
 Apache-2.0

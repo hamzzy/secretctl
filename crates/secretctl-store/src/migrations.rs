@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 4;
+pub const CURRENT_SCHEMA_VERSION: i32 = 5;
 
 pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
@@ -278,6 +278,24 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
         )?;
     }
 
+    if version < 5 {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS totp_issuances (
+                credential_id TEXT NOT NULL,
+                time_step INTEGER NOT NULL,
+                execution_id TEXT UNIQUE NOT NULL,
+                issued_at TEXT NOT NULL,
+                PRIMARY KEY(credential_id, time_step)
+            )",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at, checksum)
+             VALUES (5, datetime('now'), 'v5_totp_step_deduplication')",
+            [],
+        )?;
+    }
+
     tx.commit()?;
     Ok(())
 }
@@ -300,8 +318,8 @@ mod tests {
             .unwrap();
 
         // 10 entity tables + migrations + three M1 key/checkpoint tables
-        // + standing_grants.
-        assert_eq!(table_count, 15);
+        // + standing_grants + durable TOTP step claims.
+        assert_eq!(table_count, 16);
         let version: i32 = conn
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
                 row.get(0)

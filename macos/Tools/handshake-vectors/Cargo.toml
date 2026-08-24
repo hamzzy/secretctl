@@ -1,0 +1,16 @@
+# Standalone on purpose: an empty [workspace] table keeps this out of the main
+# workspace so generating vectors never perturbs the daemon's build graph.
+[workspace]
+
+[package]
+name = "handshake-vectors"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+secretctl-crypto = { path = "../../../crates/secretctl-crypto" }
+secretctl-protocol = { path = "../../../crates/secretctl-protocol" }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+secretctl-domain = { path = "../../../crates/secretctl-domain" }
+hex = "0.4"

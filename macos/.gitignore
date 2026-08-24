@@ -1,0 +1,10 @@
+# SwiftPM
+.build/
+.swiftpm/
+
+# Assembled app bundle, rendered icons, and the compiled icon tool
+build/
+
+# The standalone Rust helpers build outside the main workspace
+Tools/handshake-vectors/target/
+Tools/live-broker/target/

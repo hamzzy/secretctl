@@ -1,7 +1,12 @@
 use rand::RngCore;
 use secretctl_crypto::KeyPair;
 use secretctl_policy::{PolicyDocument, PolicyEvaluator};
-use secretctl_provider_macos::MacOsKeychainProvider;
+#[cfg(target_os = "linux")]
+use secretctl_provider_linux::LinuxSecretServiceProvider as PlatformSecretProvider;
+#[cfg(target_os = "macos")]
+use secretctl_provider_macos::MacOsKeychainProvider as PlatformSecretProvider;
+#[cfg(target_os = "windows")]
+use secretctl_provider_windows::WindowsCredentialManagerProvider as PlatformSecretProvider;
 use secretctl_providers::SecretProvider;
 use secretctl_store::SqliteStore;
 use secretctld::{BrokerServer, BrokerState};
@@ -28,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let store = SqliteStore::open(&db_path)?;
     store.validate_no_prohibited_persisted_keys()?;
 
-    let provider = Arc::new(MacOsKeychainProvider::new());
+    let provider = Arc::new(PlatformSecretProvider::new());
     let broker_key = if provider
         .exists("installation-signing-key")
         .await
@@ -103,9 +108,15 @@ async fn main() -> anyhow::Result<()> {
             let content = tokio::fs::read_to_string(&path).await?;
             validate_recipe_metadata_keys(&serde_json::from_str(&content)?, "$recipe")?;
             let mut recipe: secretctl_domain::SiteRecipe = serde_json::from_str(&content)?;
+            let valid_field_count = if recipe.action == secretctl_domain::ActionKind::OAuthAuthorize
+            {
+                recipe.fields.is_empty() && recipe.oauth.is_some()
+            } else {
+                (1..=5).contains(&recipe.fields.len()) && recipe.oauth.is_none()
+            };
             anyhow::ensure!(
-                (1..=5).contains(&recipe.fields.len()),
-                "recipe {} must declare between 1 and 5 fields",
+                valid_field_count,
+                "recipe {} must declare OAuth configuration with no fields, or 1 to 5 fields without OAuth configuration",
                 path.display()
             );
             anyhow::ensure!(

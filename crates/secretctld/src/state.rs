@@ -1,5 +1,6 @@
 use chrono::Utc;
 use secretctl_audit::{AuditContext, create_audit_event};
+use secretctl_browser_gateway::{BrowserLauncher, CdpFilter, CdpPipe, LaunchedBrowser};
 use secretctl_capability::{
     CapabilityClaims, ExecutionContextSnapshot, mint_capability, verify_and_consume_capability,
 };
@@ -7,20 +8,26 @@ use secretctl_crypto::{KeyPair, SecretBytes};
 use secretctl_domain::{
     ActionKind, ActionRequestState, AgentId, Approval, ApprovalId, BrowserSession,
     BrowserSessionId, BrowserSessionState, Capability, CapabilityId, CredentialDescriptor,
-    CredentialId, Execution, ExecutionId, ExecutionState, PageContext, PolicyDecision, RecipeId,
-    RequestId, SiteRecipe,
+    CredentialId, Execution, ExecutionId, ExecutionState, OAuthRecipe, PageContext, PolicyDecision,
+    RecipeId, RequestId, SiteRecipe,
 };
 use secretctl_policy::PolicyEvaluator;
 use secretctl_protocol::{
     ActionCancelParams, ActionCancelResult, ActionRequestParams, ActionResponseResult,
-    ActionStatusParams, ActionStatusResult, ExecutorConsumeParams, ExecutorConsumeResult,
-    ExecutorHeartbeatParams, ExecutorHeartbeatResult, ExecutorPrepareParams, ExecutorPrepareResult,
-    ExecutorResultParams, ExecutorResultResult, ResolvedFieldInjection, RpcError, RpcErrorCode,
+    ActionStatusParams, ActionStatusResult, BrowserCloseParams, BrowserLaunchParams,
+    BrowserLaunchResult, BrowserNavigateParams, BrowserOpenTabParams, BrowserRegisterParams,
+    BrowserRegisterResult, BrowserSessionParams, BrowserTabParams, ExecutionFieldPlan,
+    ExecutionNextParams, ExecutionNextResult, ExecutionOfferResult, ExecutionSuccessPlan,
+    ExecutorConsumeParams, ExecutorConsumeResult, ExecutorHeartbeatParams, ExecutorHeartbeatResult,
+    ExecutorPrepareParams, ExecutorPrepareResult, ExecutorResultParams, ExecutorResultResult,
+    MANAGED_EXTENSION_ID, OAuthCallbackParams, OAuthCallbackResult, OAuthExecutionPlan,
+    PageLocatorParams, PageTypePublicParams, ResolvedFieldInjection, RpcError, RpcErrorCode,
 };
 use secretctl_providers::SecretProvider;
 use secretctl_store::SqliteStore;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
+use zeroize::Zeroize;
 
 pub struct ActiveBrowserSession {
     pub session: BrowserSession,
@@ -33,6 +40,7 @@ pub struct CapabilityEntry {
     pub claims: CapabilityClaims,
     pub recipe_id: RecipeId,
     pub provider_locator: String,
+    pub credential_metadata: String,
 }
 
 pub struct ActiveExecution {
@@ -41,6 +49,48 @@ pub struct ActiveExecution {
     pub agent_id: AgentId,
     pub credential_id: CredentialId,
     pub action: ActionKind,
+    pub browser_session_id: BrowserSessionId,
+    pub tab_id: u32,
+}
+
+struct PendingOAuthExecution {
+    authorization: crate::oauth::PendingAuthorization,
+    recipe: OAuthRecipe,
+    capability_id: CapabilityId,
+    request_id: RequestId,
+    credential_id: CredentialId,
+    browser_session_id: BrowserSessionId,
+    tab_id: u32,
+}
+
+pub struct ManagedBrowser {
+    pub launched: LaunchedBrowser,
+    pub filter: Arc<CdpFilter>,
+}
+
+struct SensitiveWindowGuard {
+    filter: Arc<CdpFilter>,
+    tab_id: u32,
+    keep_open: bool,
+}
+
+impl SensitiveWindowGuard {
+    fn enter(filter: Arc<CdpFilter>, tab_id: u32) -> Self {
+        filter.enter_sensitive_window(tab_id);
+        Self {
+            filter,
+            tab_id,
+            keep_open: false,
+        }
+    }
+}
+
+impl Drop for SensitiveWindowGuard {
+    fn drop(&mut self) {
+        if !self.keep_open {
+            self.filter.exit_sensitive_window(self.tab_id);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -62,6 +112,15 @@ pub struct AuthorizationContext {
     pub page_context: PageContext,
     pub recipe: SiteRecipe,
     pub decision: PolicyDecision,
+    /// Risk this action carries *before* the presence requirement escalates it.
+    ///
+    /// `calculate_risk_level` returns High for anything that demands user
+    /// presence, which is correct for deciding whether to ask a human. It is the
+    /// wrong input for deciding whether a standing authorization may exist,
+    /// because a grant's entire purpose is to remove that presence step — so
+    /// scoring it as High would make every grantable request ungrantable.
+    /// Grant creation and grant matching both use this value instead.
+    pub base_risk: secretctl_domain::RiskLevel,
 }
 
 #[derive(Clone)]
@@ -85,12 +144,15 @@ pub struct BrokerState {
     pub sessions: Arc<RwLock<HashMap<BrowserSessionId, ActiveBrowserSession>>>,
     pub page_contexts: Arc<RwLock<HashMap<BrowserSessionId, HashMap<u32, PageContext>>>>,
     pub capabilities: Arc<Mutex<HashMap<CapabilityId, CapabilityEntry>>>,
+    pub pending_offers: Arc<Mutex<HashMap<BrowserSessionId, VecDeque<CapabilityId>>>>,
     pub executions: Arc<Mutex<HashMap<ExecutionId, ActiveExecution>>>,
+    oauth_executions: Arc<Mutex<HashMap<CapabilityId, PendingOAuthExecution>>>,
     pub requests: Arc<RwLock<HashMap<RequestId, ActionResponseResult>>>,
     pub request_agents: Arc<RwLock<HashMap<RequestId, AgentId>>>,
     pub request_fingerprints: Arc<Mutex<HashMap<RequestId, [u8; 32]>>>,
     pub approvals: Arc<Mutex<HashMap<ApprovalId, PendingApprovalEntry>>>,
     pub recipes: Arc<RwLock<HashMap<RecipeId, SiteRecipe>>>,
+    pub managed_browsers: Arc<Mutex<HashMap<secretctl_domain::BrowserInstanceId, ManagedBrowser>>>,
     audit_key_version: u32,
     audit_key: Arc<SecretBytes>,
     audit_cursor: Arc<Mutex<AuditCursor>>,
@@ -165,12 +227,15 @@ impl BrokerState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             page_contexts: Arc::new(RwLock::new(HashMap::new())),
             capabilities: Arc::new(Mutex::new(HashMap::new())),
+            pending_offers: Arc::new(Mutex::new(HashMap::new())),
             executions: Arc::new(Mutex::new(HashMap::new())),
+            oauth_executions: Arc::new(Mutex::new(HashMap::new())),
             requests: Arc::new(RwLock::new(HashMap::new())),
             request_agents: Arc::new(RwLock::new(HashMap::new())),
             request_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             approvals: Arc::new(Mutex::new(HashMap::new())),
             recipes: Arc::new(RwLock::new(HashMap::new())),
+            managed_browsers: Arc::new(Mutex::new(HashMap::new())),
             audit_key_version,
             audit_key: Arc::new(audit_key),
             audit_cursor: Arc::new(Mutex::new(AuditCursor {
@@ -300,6 +365,479 @@ impl BrokerState {
         );
     }
 
+    pub fn launch_managed_browser(
+        &self,
+        params: BrowserLaunchParams,
+    ) -> Result<BrowserLaunchResult, RpcError> {
+        let launched = BrowserLauncher::new(&params.chrome_binary, &params.extension_path)
+            .native_host(&params.native_host_binary)
+            .headless(params.headless)
+            .launch(params.profile_dir, false)
+            .map_err(|_| {
+                RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Managed Chrome launch failed")
+            })?;
+        let instance_id = launched.instance.instance_id.clone();
+        let profile_id = instance_id.to_string();
+        self.managed_browsers.lock().unwrap().insert(
+            instance_id.clone(),
+            ManagedBrowser {
+                launched,
+                filter: Arc::new(CdpFilter::new()),
+            },
+        );
+        self.record_audit_event(
+            "browser.launched",
+            "admin",
+            None,
+            &AuditContext {
+                request_id: None,
+                credential_id: None,
+                capability_id: None,
+                browser_session_id: None,
+                target_origin: None,
+                action: None,
+                decision: Some("managed_private_pipe".to_string()),
+                risk_level: None,
+                error_code: None,
+            },
+        )?;
+        Ok(BrowserLaunchResult {
+            instance_id,
+            profile_id,
+            browser_session_id: None,
+            gateway_endpoint: "agent-rpc:constrained-browser".to_string(),
+            diagnostics: Vec::new(),
+        })
+    }
+
+    pub fn browser_launch_status(
+        &self,
+        instance_id: &secretctl_domain::BrowserInstanceId,
+    ) -> Result<BrowserLaunchResult, RpcError> {
+        let browsers = self.managed_browsers.lock().unwrap();
+        let browser = browsers.get(instance_id).ok_or_else(|| {
+            RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown browser instance")
+        })?;
+        let session_id = self
+            .sessions
+            .read()
+            .unwrap()
+            .values()
+            .find(|active| &active.session.instance_id == instance_id)
+            .map(|active| active.session.session_id.clone());
+        Ok(BrowserLaunchResult {
+            instance_id: instance_id.clone(),
+            profile_id: instance_id.to_string(),
+            browser_session_id: session_id,
+            gateway_endpoint: "agent-rpc:constrained-browser".to_string(),
+            diagnostics: browser.launched.startup_diagnostics.lock().unwrap().clone(),
+        })
+    }
+
+    pub fn close_managed_browser(&self, params: BrowserCloseParams) -> Result<(), RpcError> {
+        let mut browser = self
+            .managed_browsers
+            .lock()
+            .unwrap()
+            .remove(&params.instance_id)
+            .ok_or_else(|| {
+                RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown browser instance")
+            })?;
+        browser.launched.shutdown().map_err(|_| {
+            RpcError::new(
+                RpcErrorCode::INTERNAL_ERROR,
+                "Managed Chrome shutdown failed",
+            )
+        })?;
+        for active in self.sessions.write().unwrap().values_mut() {
+            if active.session.instance_id == params.instance_id {
+                active.session.state = BrowserSessionState::Terminated;
+            }
+        }
+        Ok(())
+    }
+
+    fn sensitive_filter_for_session(
+        &self,
+        session_id: &BrowserSessionId,
+    ) -> Option<Arc<CdpFilter>> {
+        let instance_id = self
+            .sessions
+            .read()
+            .unwrap()
+            .get(session_id)?
+            .session
+            .instance_id
+            .clone();
+        self.managed_browsers
+            .lock()
+            .unwrap()
+            .get(&instance_id)
+            .map(|browser| browser.filter.clone())
+    }
+
+    fn execution_sensitive_filter(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> Option<(Arc<CdpFilter>, u32)> {
+        let (session_id, tab_id) = {
+            let executions = self.executions.lock().unwrap();
+            let active = executions.get(execution_id)?;
+            (active.browser_session_id.clone(), active.tab_id)
+        };
+        self.sensitive_filter_for_session(&session_id)
+            .map(|filter| (filter, tab_id))
+    }
+
+    fn browser_transport(
+        &self,
+        session_id: &BrowserSessionId,
+    ) -> Result<(CdpPipe, Arc<CdpFilter>), RpcError> {
+        let instance_id = {
+            let sessions = self.sessions.read().unwrap();
+            let active = sessions.get(session_id).ok_or_else(|| {
+                RpcError::new(RpcErrorCode::SESSION_TERMINATED, "Unknown browser session")
+            })?;
+            if active.session.state != BrowserSessionState::Active {
+                return Err(RpcError::new(
+                    RpcErrorCode::SESSION_TERMINATED,
+                    "Browser session is not active",
+                ));
+            }
+            active.session.instance_id.clone()
+        };
+        let browsers = self.managed_browsers.lock().unwrap();
+        let browser = browsers.get(&instance_id).ok_or_else(|| {
+            RpcError::new(
+                RpcErrorCode::SESSION_TERMINATED,
+                "Managed browser is unavailable",
+            )
+        })?;
+        let pipe = browser.launched.cdp_pipe.clone().ok_or_else(|| {
+            RpcError::new(
+                RpcErrorCode::SESSION_TERMINATED,
+                "Private browser transport is unavailable",
+            )
+        })?;
+        Ok((pipe, browser.filter.clone()))
+    }
+
+    fn safe_navigation_url(raw: &str, allow_blank: bool) -> Result<String, RpcError> {
+        if allow_blank && raw == "about:blank" {
+            return Ok(raw.to_string());
+        }
+        let parsed = url::Url::parse(raw)
+            .map_err(|_| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Invalid navigation URL"))?;
+        let loopback_http = parsed.scheme() == "http"
+            && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        if (parsed.scheme() != "https" && !loopback_http)
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "Navigation scheme or embedded credentials rejected",
+            ));
+        }
+        Ok(parsed.into())
+    }
+
+    fn cdp_failure() -> RpcError {
+        RpcError::new(
+            RpcErrorCode::SECURITY_VIOLATION,
+            "Browser operation rejected",
+        )
+    }
+
+    fn attach_tab(pipe: &CdpPipe, filter: &CdpFilter, tab_id: &str) -> Result<String, RpcError> {
+        let result = pipe
+            .request(
+                filter,
+                "Target.attachToTarget",
+                None,
+                serde_json::json!({"targetId": tab_id, "flatten": true}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        result
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(Self::cdp_failure)
+    }
+
+    pub fn handle_browser_tabs(
+        &self,
+        params: BrowserSessionParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let result = pipe
+            .request(&filter, "Target.getTargets", None, serde_json::json!({}))
+            .map_err(|_| Self::cdp_failure())?;
+        let tabs = result
+            .get("targetInfos")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|target| target.get("type").and_then(serde_json::Value::as_str) == Some("page"))
+            .filter_map(|target| {
+                let id = target.get("targetId")?.as_str()?;
+                let raw_url = target.get("url")?.as_str()?;
+                let mut url = url::Url::parse(raw_url).ok()?;
+                if !matches!(url.scheme(), "https" | "http") {
+                    return None;
+                }
+                url.set_query(None);
+                url.set_fragment(None);
+                let title = target
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                Some(serde_json::json!({
+                    "tab_id": id,
+                    "url": url.as_str(),
+                    "title": title.chars().take(200).collect::<String>()
+                }))
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({"tabs": tabs}))
+    }
+
+    pub fn handle_browser_open_tab(
+        &self,
+        params: BrowserOpenTabParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let url = Self::safe_navigation_url(&params.url, true)?;
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let result = pipe
+            .request(
+                &filter,
+                "Target.createTarget",
+                None,
+                serde_json::json!({"url": url}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        Ok(
+            serde_json::json!({"tab_id": result.get("targetId").cloned().unwrap_or(serde_json::Value::Null)}),
+        )
+    }
+
+    pub fn handle_browser_close_tab(
+        &self,
+        params: BrowserTabParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        pipe.request(
+            &filter,
+            "Target.closeTarget",
+            None,
+            serde_json::json!({"targetId": params.tab_id}),
+        )
+        .map_err(|_| Self::cdp_failure())?;
+        Ok(serde_json::json!({"closed": true}))
+    }
+
+    pub fn handle_browser_navigate(
+        &self,
+        params: BrowserNavigateParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let url = Self::safe_navigation_url(&params.url, false)?;
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        pipe.request_with_session(
+            &filter,
+            "Page.navigate",
+            None,
+            Some(&cdp_session),
+            serde_json::json!({"url": url}),
+        )
+        .map_err(|_| Self::cdp_failure())?;
+        Ok(serde_json::json!({"navigated": true}))
+    }
+
+    pub fn handle_browser_reload(
+        &self,
+        params: BrowserTabParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        pipe.request_with_session(
+            &filter,
+            "Page.reload",
+            None,
+            Some(&cdp_session),
+            serde_json::json!({"ignoreCache": false}),
+        )
+        .map_err(|_| Self::cdp_failure())?;
+        Ok(serde_json::json!({"reloaded": true}))
+    }
+
+    fn locate_node(
+        pipe: &CdpPipe,
+        filter: &CdpFilter,
+        cdp_session: &str,
+        selector: &str,
+    ) -> Result<u64, RpcError> {
+        let document = pipe
+            .request_with_session(
+                filter,
+                "DOM.getDocument",
+                None,
+                Some(cdp_session),
+                serde_json::json!({"depth": 0}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        let root_id = document
+            .pointer("/root/nodeId")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(Self::cdp_failure)?;
+        let result = pipe
+            .request_with_session(
+                filter,
+                "DOM.querySelectorAll",
+                None,
+                Some(cdp_session),
+                serde_json::json!({"nodeId": root_id, "selector": selector}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        let nodes = result
+            .get("nodeIds")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(Self::cdp_failure)?;
+        if nodes.len() != 1 {
+            return Err(RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "Locator must resolve exactly once",
+            ));
+        }
+        nodes[0].as_u64().ok_or_else(Self::cdp_failure)
+    }
+
+    fn node_is_sensitive(node: &serde_json::Value) -> bool {
+        let attributes = node
+            .pointer("/node/attributes")
+            .and_then(serde_json::Value::as_array);
+        let mut sensitive = false;
+        if let Some(attributes) = attributes {
+            for pair in attributes.chunks(2) {
+                let name = pair
+                    .first()
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let value = pair
+                    .get(1)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if (name == "type" && value == "password")
+                    || (name == "autocomplete"
+                        && matches!(
+                            value.as_str(),
+                            "current-password" | "new-password" | "one-time-code"
+                        ))
+                    || (matches!(name.as_str(), "name" | "id")
+                        && ["password", "passwd", "otp", "totp", "secret", "token"]
+                            .iter()
+                            .any(|term| value.contains(term)))
+                {
+                    sensitive = true;
+                }
+            }
+        }
+        sensitive
+    }
+
+    pub fn handle_page_click(
+        &self,
+        params: PageLocatorParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let selector = params.locator.css().map_err(|_| Self::cdp_failure())?;
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        let node_id = Self::locate_node(&pipe, &filter, &cdp_session, &selector)?;
+        let model = pipe
+            .request_with_session(
+                &filter,
+                "DOM.getBoxModel",
+                None,
+                Some(&cdp_session),
+                serde_json::json!({"nodeId": node_id}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        let content = model
+            .pointer("/model/content")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(Self::cdp_failure)?;
+        let coordinates = content
+            .iter()
+            .filter_map(serde_json::Value::as_f64)
+            .collect::<Vec<_>>();
+        if coordinates.len() != 8 {
+            return Err(Self::cdp_failure());
+        }
+        let x = (coordinates[0] + coordinates[2] + coordinates[4] + coordinates[6]) / 4.0;
+        let y = (coordinates[1] + coordinates[3] + coordinates[5] + coordinates[7]) / 4.0;
+        for kind in ["mousePressed", "mouseReleased"] {
+            pipe.request_with_session(
+                &filter,
+                "Input.dispatchMouseEvent",
+                None,
+                Some(&cdp_session),
+                serde_json::json!({"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        }
+        Ok(serde_json::json!({"clicked": true}))
+    }
+
+    pub fn handle_page_type_public(
+        &self,
+        params: PageTypePublicParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        if params.text.len() > 16 * 1024 || params.text.contains('\0') {
+            return Err(RpcError::new(
+                RpcErrorCode::INVALID_PARAMS,
+                "Public text rejected",
+            ));
+        }
+        let selector = params.locator.css().map_err(|_| Self::cdp_failure())?;
+        let (pipe, filter) = self.browser_transport(&params.session_id)?;
+        let cdp_session = Self::attach_tab(&pipe, &filter, &params.tab_id)?;
+        let node_id = Self::locate_node(&pipe, &filter, &cdp_session, &selector)?;
+        let node = pipe
+            .request_with_session(
+                &filter,
+                "DOM.describeNode",
+                None,
+                Some(&cdp_session),
+                serde_json::json!({"nodeId": node_id}),
+            )
+            .map_err(|_| Self::cdp_failure())?;
+        if Self::node_is_sensitive(&node) {
+            return Err(RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "Protected field rejected",
+            ));
+        }
+        pipe.request_with_session(
+            &filter,
+            "DOM.focus",
+            None,
+            Some(&cdp_session),
+            serde_json::json!({"nodeId": node_id}),
+        )
+        .map_err(|_| Self::cdp_failure())?;
+        pipe.request_with_session(
+            &filter,
+            "Input.insertText",
+            None,
+            Some(&cdp_session),
+            serde_json::json!({"text": params.text}),
+        )
+        .map_err(|_| Self::cdp_failure())?;
+        Ok(serde_json::json!({"typed": true}))
+    }
+
     pub fn register_page_context(&self, context: PageContext, session_id: BrowserSessionId) {
         let mut contexts = self.page_contexts.write().unwrap();
         contexts
@@ -356,7 +894,9 @@ impl BrokerState {
             authorization.decision.policy_hash.clone(),
             now,
             authorization.decision.ttl_seconds,
-            authorization.decision.max_uses,
+            // A policy may bound repeated authorizations, but each
+            // secret-bearing execution capability is always single-use.
+            1,
         );
         let claims = secretctl_capability::parse_and_verify_token(
             &token,
@@ -400,6 +940,8 @@ impl BrokerState {
             cursor.next_sequence += 1;
             cursor.latest_hash = audit_event.event_hash;
         }
+        let offer_session_id = capability.browser_session_id.clone();
+        let offer_capability_id = capability.capability_id.clone();
         self.capabilities.lock().unwrap().insert(
             capability.capability_id.clone(),
             CapabilityEntry {
@@ -408,14 +950,22 @@ impl BrokerState {
                 claims,
                 recipe_id: authorization.recipe.recipe_id,
                 provider_locator: authorization.credential.provider_locator,
+                credential_metadata: authorization.credential.metadata_json,
             },
         );
+        self.pending_offers
+            .lock()
+            .unwrap()
+            .entry(offer_session_id)
+            .or_default()
+            .push_back(offer_capability_id);
         let response = ActionResponseResult {
             request_id: authorization.request_id,
             state: ActionRequestState::CapabilityIssued,
             result_code: Some("CAPABILITY_ISSUED".to_string()),
             execution_id: None,
             evidence_ref: Some(format!("cap:{}", capability.capability_id)),
+            grant_id: None,
             completed_at: None,
         };
         self.requests
@@ -483,6 +1033,7 @@ impl BrokerState {
                 result_code: Some("REQUESTED".to_string()),
                 execution_id: None,
                 evidence_ref: None,
+                grant_id: None,
                 completed_at: None,
             },
         );
@@ -592,11 +1143,18 @@ impl BrokerState {
                 .tab_hint
                 .and_then(|tab_id| session_contexts.get(&tab_id))
                 .or_else(|| {
-                    if session_contexts.len() == 1 {
-                        session_contexts.values().next()
-                    } else {
-                        None
-                    }
+                    session_contexts
+                        .values()
+                        .filter(|context| {
+                            now - context.observed_at <= chrono::Duration::seconds(2)
+                                && context.top_origin.matches(target_origin)
+                                && params
+                                    .target
+                                    .path_prefix
+                                    .as_ref()
+                                    .is_none_or(|prefix| context.path.starts_with(prefix))
+                        })
+                        .max_by_key(|context| context.observed_at)
                 })
                 .ok_or_else(|| {
                     RpcError::new(
@@ -670,6 +1228,37 @@ impl BrokerState {
             ));
         }
 
+        let evaluated_risk = secretctl_policy::calculate_risk_level(
+            params.action,
+            decision.require_user_presence,
+            &assurance,
+        );
+        if !crate::presence::assurance_available(
+            crate::presence::current_platform(),
+            evaluated_risk,
+        ) {
+            self.record_audit_event(
+                "security.presence_unavailable",
+                "broker",
+                Some(agent_id.to_string()),
+                &AuditContext {
+                    request_id: Some(params.request_id.to_string()),
+                    credential_id: Some(credential.credential_id.to_string()),
+                    capability_id: None,
+                    browser_session_id: Some(params.browser_session_id.to_string()),
+                    target_origin: Some(target_origin.to_string()),
+                    action: Some(params.action.to_string()),
+                    decision: Some("deny".to_string()),
+                    risk_level: Some(evaluated_risk.as_str().to_string()),
+                    error_code: Some("USER_PRESENCE_UNAVAILABLE".to_string()),
+                },
+            )?;
+            return Err(RpcError::new(
+                RpcErrorCode::USER_PRESENCE_UNAVAILABLE,
+                "Configured user-presence assurance is unavailable",
+            ));
+        }
+
         // 4. Match site recipe
         let matched_recipe = {
             let recipes = self.recipes.read().unwrap();
@@ -702,6 +1291,25 @@ impl BrokerState {
                 })?
         };
 
+        if params.action == ActionKind::OAuthAuthorize {
+            matched_recipe
+                .oauth
+                .as_ref()
+                .ok_or_else(|| {
+                    RpcError::new(
+                        RpcErrorCode::SECURITY_VIOLATION,
+                        "OAuth recipe configuration is required",
+                    )
+                })?
+                .validate()
+                .map_err(|_| {
+                    RpcError::new(
+                        RpcErrorCode::SECURITY_VIOLATION,
+                        "OAuth recipe configuration is invalid",
+                    )
+                })?;
+        }
+
         let agent_name = self
             .store
             .get_enrolled_agent(agent_id.as_str())
@@ -719,8 +1327,36 @@ impl BrokerState {
             extension_key_id,
             page_context: measured_context,
             recipe: matched_recipe,
+            base_risk: secretctl_policy::calculate_risk_level(params.action, false, &assurance),
             decision,
         };
+
+        // A live standing authorization replaces the interactive approval step,
+        // and nothing else: the origin, navigation-epoch, recipe, and capability
+        // checks above have all already run, and the capability minted below is
+        // identical to the one a human approval would have produced.
+        if authorization.decision.require_user_presence
+            && let Some(grant) = self.matching_standing_grant(&authorization, now)?
+        {
+            let _ = self.store.touch_standing_grant(&grant.grant_id, now);
+            self.record_audit_event(
+                "approval.auto_granted",
+                "broker",
+                Some(authorization.agent_id.to_string()),
+                &AuditContext {
+                    request_id: Some(authorization.request_id.to_string()),
+                    credential_id: Some(credential_id.to_string()),
+                    capability_id: None,
+                    browser_session_id: Some(authorization.browser_session_id.to_string()),
+                    target_origin: Some(authorization.page_context.top_origin.to_string()),
+                    action: Some(authorization.action.to_string()),
+                    decision: Some("standing_grant".to_string()),
+                    risk_level: Some(authorization.base_risk.as_str().to_string()),
+                    error_code: None,
+                },
+            )?;
+            return self.mint_authorized_capability(authorization, None);
+        }
 
         if authorization.decision.require_user_presence {
             let approval_id = ApprovalId::new();
@@ -781,6 +1417,7 @@ impl BrokerState {
                 result_code: Some("APPROVAL_REQUIRED".to_string()),
                 execution_id: None,
                 evidence_ref: Some(format!("approval:{approval_id}")),
+                grant_id: None,
                 completed_at: None,
             };
             self.requests
@@ -851,6 +1488,44 @@ impl BrokerState {
             request_id: params.request_id,
             cancelled: true,
         })
+    }
+
+    /// The live standing authorization covering this exact request, if one
+    /// exists.
+    ///
+    /// Matching is exact on agent, credential, action, and origin, and the
+    /// grant must still be within its risk ceiling and lifetime. A grant that
+    /// itself records `require_presence` never matches, so authority can never
+    /// be widened past a decision that demanded a live human.
+    fn matching_standing_grant(
+        &self,
+        authorization: &AuthorizationContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<secretctl_domain::StandingGrant>, RpcError> {
+        if authorization.base_risk.rank() > secretctl_domain::MAX_GRANTABLE_RISK.rank() {
+            return Ok(None);
+        }
+        let candidate = self
+            .store
+            .find_matching_standing_grant(
+                &authorization.agent_id,
+                &authorization.credential.name,
+                authorization.action,
+                &authorization.page_context.top_origin,
+            )
+            .map_err(|_| {
+                RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Grant storage unavailable")
+            })?;
+        Ok(candidate.filter(|grant| {
+            grant.covers(
+                &authorization.agent_id,
+                &authorization.credential.name,
+                authorization.action,
+                &authorization.page_context.top_origin,
+                authorization.base_risk,
+                now,
+            )
+        }))
     }
 
     pub fn list_pending_approvals(&self) -> Vec<Approval> {
@@ -1016,6 +1691,7 @@ impl BrokerState {
             result_code: Some(outcome.to_ascii_uppercase()),
             execution_id: None,
             evidence_ref: None,
+            grant_id: None,
             completed_at: Some(now.to_rfc3339()),
         };
         self.requests
@@ -1074,6 +1750,409 @@ impl BrokerState {
         })
     }
 
+    pub fn handle_browser_register(
+        &self,
+        params: BrowserRegisterParams,
+    ) -> Result<BrowserRegisterResult, RpcError> {
+        let browser_major = params
+            .browser_version
+            .split("Chrome/")
+            .nth(1)
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse::<u32>().ok());
+        if params.extension_id != MANAGED_EXTENSION_ID
+            || params.extension_key_id != params.extension_id
+            || params.launcher_nonce.len() < 32
+            || params.launcher_nonce.len() > 256
+            || params.profile_id.is_empty()
+            || params.extension_version != "1.0.0"
+            || browser_major.is_none_or(|major| major < 120)
+        {
+            return Err(RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "Browser attestation rejected",
+            ));
+        }
+
+        let session_id = BrowserSessionId::new();
+        self.register_browser_session(BrowserSession {
+            session_id: session_id.clone(),
+            instance_id: params.instance_id,
+            extension_key_id: params.extension_key_id,
+            profile_id: params.profile_id,
+            assurance: "managed".to_string(),
+            state: BrowserSessionState::Active,
+            last_heartbeat_at: Utc::now(),
+        });
+        self.record_audit_event(
+            "browser.registered",
+            "executor",
+            Some(params.extension_id),
+            &AuditContext {
+                request_id: None,
+                credential_id: None,
+                capability_id: None,
+                browser_session_id: Some(session_id.to_string()),
+                target_origin: None,
+                action: None,
+                decision: Some("attested".to_string()),
+                risk_level: None,
+                error_code: None,
+            },
+        )?;
+        Ok(BrowserRegisterResult {
+            browser_session_id: session_id,
+            assurance: "managed".to_string(),
+            heartbeat_interval_seconds: 5,
+        })
+    }
+
+    pub fn handle_execution_next(
+        &self,
+        params: ExecutionNextParams,
+    ) -> Result<ExecutionNextResult, RpcError> {
+        {
+            let sessions = self.sessions.read().unwrap();
+            let active = sessions.get(&params.browser_session_id).ok_or_else(|| {
+                RpcError::new(RpcErrorCode::SESSION_TERMINATED, "Unknown browser session")
+            })?;
+            if active.session.state != BrowserSessionState::Active
+                || Utc::now() - active.session.last_heartbeat_at >= chrono::Duration::seconds(10)
+            {
+                return Err(RpcError::new(
+                    RpcErrorCode::SESSION_TERMINATED,
+                    "Browser session is stale",
+                ));
+            }
+        }
+
+        loop {
+            let capability_id = self
+                .pending_offers
+                .lock()
+                .unwrap()
+                .entry(params.browser_session_id.clone())
+                .or_default()
+                .pop_front();
+            let Some(capability_id) = capability_id else {
+                return Ok(ExecutionNextResult { offer: None });
+            };
+            let caps = self.capabilities.lock().unwrap();
+            let Some(entry) = caps.get(&capability_id) else {
+                continue;
+            };
+            if entry.capability.state.is_terminal() || entry.capability.expires_at <= Utc::now() {
+                continue;
+            }
+            let recipes = self.recipes.read().unwrap();
+            let recipe = recipes.get(&entry.recipe_id).ok_or_else(|| {
+                RpcError::new(
+                    RpcErrorCode::RECIPE_NOT_FOUND,
+                    "Bound recipe is unavailable",
+                )
+            })?;
+            let oauth = if entry.claims.action == ActionKind::OAuthAuthorize {
+                let config = recipe.oauth.clone().ok_or_else(|| {
+                    RpcError::new(
+                        RpcErrorCode::SECURITY_VIOLATION,
+                        "OAuth recipe is unavailable",
+                    )
+                })?;
+                config.validate().map_err(|_| {
+                    RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "OAuth recipe is invalid")
+                })?;
+                let pending = crate::oauth::PendingAuthorization::new(
+                    config.redirect_uri.clone(),
+                    config.allowed_scopes.clone(),
+                );
+                let authorization_url = pending
+                    .authorization_url(&config.authorization_endpoint, &config.client_id)
+                    .map_err(|_| {
+                        RpcError::new(
+                            RpcErrorCode::SECURITY_VIOLATION,
+                            "OAuth authorization URL is invalid",
+                        )
+                    })?;
+                self.oauth_executions.lock().unwrap().insert(
+                    capability_id.clone(),
+                    PendingOAuthExecution {
+                        authorization: pending,
+                        recipe: config.clone(),
+                        capability_id: capability_id.clone(),
+                        request_id: entry.claims.req_id.clone(),
+                        credential_id: entry.claims.cred_id.clone(),
+                        browser_session_id: entry.claims.browser_session_id.clone(),
+                        tab_id: entry.claims.tab_id,
+                    },
+                );
+                Some(OAuthExecutionPlan {
+                    authorization_url,
+                    issuer_origin: config.issuer,
+                    redirect_uri: config.redirect_uri,
+                })
+            } else {
+                None
+            };
+            return Ok(ExecutionNextResult {
+                offer: Some(ExecutionOfferResult {
+                    capability_token: entry.token.clone(),
+                    recipe_id: entry.recipe_id.clone(),
+                    tab_id: entry.claims.tab_id,
+                    frame_id: entry.claims.frame_id,
+                    document_id: entry.claims.document_id.clone(),
+                    navigation_epoch: entry.claims.navigation_epoch,
+                    top_origin: entry.claims.top_origin.clone(),
+                    frame_origin: entry.claims.frame_origin.clone(),
+                    fields: recipe
+                        .fields
+                        .iter()
+                        .map(|field| ExecutionFieldPlan {
+                            role: field.role.clone(),
+                            selector: field.selector.clone(),
+                            optional: field.optional,
+                            clear_first: field.clear_first,
+                        })
+                        .collect(),
+                    auto_submit_selector: recipe.submit.as_ref().and_then(|submit| {
+                        submit
+                            .auto_submit
+                            .then(|| submit.selector.clone())
+                            .flatten()
+                    }),
+                    success: recipe.success_indicators.as_ref().map(|success| {
+                        ExecutionSuccessPlan {
+                            navigation_origin: success.navigation_origin.clone(),
+                            selector_present: success.selector_present.clone(),
+                            selector_absent: success.selector_absent.clone(),
+                            timeout_ms: success.timeout_ms.unwrap_or(5_000).min(30_000),
+                        }
+                    }),
+                    oauth,
+                }),
+            });
+        }
+    }
+
+    fn fail_oauth_callback(
+        &self,
+        pending: &PendingOAuthExecution,
+        capability_id: &CapabilityId,
+        error: RpcError,
+    ) -> RpcError {
+        self.requests.write().unwrap().insert(
+            pending.request_id.clone(),
+            ActionResponseResult {
+                request_id: pending.request_id.clone(),
+                state: ActionRequestState::Failed,
+                result_code: Some(error.message.clone()),
+                execution_id: None,
+                evidence_ref: None,
+                grant_id: None,
+                completed_at: Some(Utc::now().to_rfc3339()),
+            },
+        );
+        let _ = self.record_audit_event(
+            "oauth.callback_failed",
+            "broker",
+            None,
+            &AuditContext {
+                request_id: Some(pending.request_id.to_string()),
+                credential_id: Some(pending.credential_id.to_string()),
+                capability_id: Some(capability_id.to_string()),
+                browser_session_id: Some(pending.browser_session_id.to_string()),
+                target_origin: Some(pending.recipe.issuer.to_string()),
+                action: Some(ActionKind::OAuthAuthorize.to_string()),
+                decision: Some("failed".into()),
+                risk_level: None,
+                error_code: Some(error.message.clone()),
+            },
+        );
+        error
+    }
+
+    pub async fn handle_oauth_callback(
+        &self,
+        mut params: OAuthCallbackParams,
+    ) -> Result<OAuthCallbackResult, RpcError> {
+        let capability_id = self
+            .capabilities
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(id, entry)| (entry.token == params.capability_token).then(|| id.clone()))
+            .ok_or_else(|| {
+                RpcError::new(
+                    RpcErrorCode::SECURITY_VIOLATION,
+                    "OAuth capability rejected",
+                )
+            })?;
+        params.capability_token.zeroize();
+        let mut pending = self
+            .oauth_executions
+            .lock()
+            .unwrap()
+            .remove(&capability_id)
+            .ok_or_else(|| {
+                RpcError::new(
+                    RpcErrorCode::SECURITY_VIOLATION,
+                    "OAuth callback is unavailable",
+                )
+            })?;
+        if pending.capability_id != capability_id
+            || pending.browser_session_id != params.browser_session_id
+            || pending.tab_id != params.tab_id
+        {
+            let error = RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "OAUTH_CALLBACK_BINDING_REJECTED",
+            );
+            params.callback_uri.zeroize();
+            return Err(self.fail_oauth_callback(&pending, &capability_id, error));
+        }
+        self.store
+            .consume_oauth_capability(&capability_id)
+            .map_err(|_| {
+                self.fail_oauth_callback(
+                    &pending,
+                    &capability_id,
+                    RpcError::new(
+                        RpcErrorCode::CAPABILITY_CONSUMED,
+                        "OAuth capability already consumed",
+                    ),
+                )
+            })?;
+        if let Some(entry) = self.capabilities.lock().unwrap().get_mut(&capability_id) {
+            entry.capability.state = secretctl_domain::CapabilityState::Consumed;
+            entry.capability.used_count += 1;
+        }
+        let callback_result = pending.authorization.consume_callback(&params.callback_uri);
+        params.callback_uri.zeroize();
+        let code = callback_result.map_err(|error| {
+            let code = match error {
+                crate::oauth::OAuthCallbackError::StateMismatch => "OAUTH_STATE_MISMATCH",
+                crate::oauth::OAuthCallbackError::RedirectMismatch => "OAUTH_REDIRECT_MISMATCH",
+                crate::oauth::OAuthCallbackError::Duplicate => "OAUTH_CODE_REPLAY",
+                _ => "OAUTH_CALLBACK_REJECTED",
+            };
+            self.fail_oauth_callback(
+                &pending,
+                &capability_id,
+                RpcError::new(RpcErrorCode::SECURITY_VIOLATION, code),
+            )
+        })?;
+        let tokens = crate::oauth::exchange_code(
+            &pending.recipe.token_endpoint,
+            &pending.recipe.client_id,
+            &pending.authorization,
+            &code,
+        )
+        .await
+        .map_err(|error| {
+            let code = match error {
+                crate::oauth::TokenExchangeError::ScopeMismatch => "OAUTH_SCOPE_MISMATCH",
+                crate::oauth::TokenExchangeError::InsecureEndpoint => {
+                    "OAUTH_TOKEN_ENDPOINT_REJECTED"
+                }
+                _ => "OAUTH_TOKEN_EXCHANGE_FAILED",
+            };
+            self.fail_oauth_callback(
+                &pending,
+                &capability_id,
+                RpcError::new(RpcErrorCode::SECURITY_VIOLATION, code),
+            )
+        })?;
+        let grant = crate::oauth::store_token_grant(
+            self.provider.as_ref(),
+            &self.store,
+            pending.credential_id.clone(),
+            tokens,
+        )
+        .await
+        .map_err(|_| {
+            self.fail_oauth_callback(
+                &pending,
+                &capability_id,
+                RpcError::new(
+                    RpcErrorCode::INTERNAL_ERROR,
+                    "OAuth token storage unavailable",
+                ),
+            )
+        })?;
+        let completed_at = Utc::now();
+        self.requests.write().unwrap().insert(
+            pending.request_id.clone(),
+            ActionResponseResult {
+                request_id: pending.request_id.clone(),
+                state: ActionRequestState::Completed,
+                result_code: Some("SUCCESS".into()),
+                execution_id: None,
+                evidence_ref: Some(format!("oauth:{}", grant.grant_id)),
+                grant_id: Some(grant.grant_id.clone()),
+                completed_at: Some(completed_at.to_rfc3339()),
+            },
+        );
+        self.record_audit_event(
+            "oauth.token_stored",
+            "broker",
+            None,
+            &AuditContext {
+                request_id: Some(pending.request_id.to_string()),
+                credential_id: Some(pending.credential_id.to_string()),
+                capability_id: Some(capability_id.to_string()),
+                browser_session_id: Some(pending.browser_session_id.to_string()),
+                target_origin: Some(pending.recipe.issuer.to_string()),
+                action: Some(ActionKind::OAuthAuthorize.to_string()),
+                decision: Some("completed".into()),
+                risk_level: None,
+                error_code: None,
+            },
+        )?;
+        Ok(OAuthCallbackResult {
+            grant_id: grant.grant_id,
+            scopes: grant.scopes,
+            expires_at: grant.expires_at.map(|value| value.to_rfc3339()),
+        })
+    }
+
+    fn totp_generator(metadata_json: &str) -> Result<secretctl_crypto::TotpGenerator, RpcError> {
+        let metadata: serde_json::Value = serde_json::from_str(metadata_json).map_err(|_| {
+            RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "Invalid TOTP metadata")
+        })?;
+        let algorithm = metadata
+            .get("algorithm")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("SHA1")
+            .to_ascii_uppercase();
+        if algorithm != "SHA1" {
+            return Err(RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "Unsupported TOTP algorithm",
+            ));
+        }
+        let digits = metadata
+            .get("digits")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(6) as u32;
+        if !matches!(digits, 6 | 8) {
+            return Err(RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "TOTP digits must be 6 or 8",
+            ));
+        }
+        let period = metadata
+            .get("period_seconds")
+            .or_else(|| metadata.get("period"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(30);
+        if !(5..=300).contains(&period) {
+            return Err(RpcError::new(
+                RpcErrorCode::SECURITY_VIOLATION,
+                "TOTP period is outside the supported range",
+            ));
+        }
+        Ok(secretctl_crypto::TotpGenerator::with_digits(digits).with_period_seconds(period))
+    }
+
     pub async fn handle_executor_consume(
         &self,
         params: ExecutorConsumeParams,
@@ -1084,8 +2163,8 @@ impl BrokerState {
             caps.values()
                 .find(|entry| entry.token == params.capability_token)
                 .filter(|entry| entry.capability.action == ActionKind::AuthenticateTotp)
-                .and_then(|_| {
-                    let generator = secretctl_crypto::TotpGenerator::new();
+                .and_then(|entry| {
+                    let generator = Self::totp_generator(&entry.credential_metadata).ok()?;
                     let (_, seconds_remaining) =
                         generator.compute_time_step(now.timestamp() as u64);
                     (seconds_remaining < 2).then_some(seconds_remaining)
@@ -1121,7 +2200,7 @@ impl BrokerState {
             navigation_epoch: params.current_context.navigation_epoch,
         };
 
-        let (mut capability, recipe_id, provider_locator) = {
+        let (mut capability, recipe_id, provider_locator, credential_metadata) = {
             let caps = self.capabilities.lock().unwrap();
             let entry = caps
                 .values()
@@ -1137,8 +2216,12 @@ impl BrokerState {
                 entry.capability.clone(),
                 entry.recipe_id.clone(),
                 entry.provider_locator.clone(),
+                entry.credential_metadata.clone(),
             )
         };
+        let totp_generator = (capability.action == ActionKind::AuthenticateTotp)
+            .then(|| Self::totp_generator(&credential_metadata))
+            .transpose()?;
         let claims = verify_and_consume_capability(
             &mut capability,
             &params.capability_token,
@@ -1184,6 +2267,16 @@ impl BrokerState {
             risk_level: None,
             error_code: None,
         };
+        let totp_step_claim = (claims.action == ActionKind::AuthenticateTotp).then(|| {
+            (
+                claims.cred_id.clone(),
+                totp_generator
+                    .as_ref()
+                    .expect("validated TOTP metadata")
+                    .compute_time_step(now.timestamp() as u64)
+                    .0,
+            )
+        });
         {
             let mut cursor = self.audit_cursor.lock().unwrap();
             let audit_event = create_audit_event(
@@ -1199,7 +2292,14 @@ impl BrokerState {
             )
             .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
             self.store
-                .consume_capability_with_execution_and_audit(&claims.jti, &execution, &audit_event)
+                .consume_capability_with_execution_and_audit(
+                    &claims.jti,
+                    &execution,
+                    &audit_event,
+                    totp_step_claim
+                        .as_ref()
+                        .map(|(credential_id, step)| (credential_id, *step)),
+                )
                 .map_err(|error| match error {
                     secretctl_store::StoreError::StateConflict(_) => RpcError::new(
                         RpcErrorCode::CAPABILITY_CONSUMED,
@@ -1221,6 +2321,8 @@ impl BrokerState {
                 agent_id: claims.agent_id.clone(),
                 credential_id: claims.cred_id.clone(),
                 action: claims.action,
+                browser_session_id: claims.browser_session_id.clone(),
+                tab_id: claims.tab_id,
             },
         );
 
@@ -1234,15 +2336,34 @@ impl BrokerState {
             })?
         };
 
-        if recipe.fields.is_empty() || recipe.fields.len() > 5 {
+        if claims.action != ActionKind::OAuthAuthorize
+            && (recipe.fields.is_empty() || recipe.fields.len() > 5)
+        {
             return Err(RpcError::new(
                 RpcErrorCode::SECURITY_VIOLATION,
                 "Recipe field count is outside the supported security limit",
             ));
         }
 
+        // Observation APIs are globally blocked for this managed browser from
+        // immediately before provider retrieval until the executor reports a
+        // terminal result. Any error below automatically closes the window.
+        let mut sensitive_guard = self
+            .sensitive_filter_for_session(&claims.browser_session_id)
+            .map(|filter| SensitiveWindowGuard::enter(filter, claims.tab_id));
+
         // Retrieve secret bytes or compute TOTP based on action kind
         let fields = match claims.action {
+            ActionKind::OAuthAuthorize => {
+                // OAuth authorization does not inject a provider secret into
+                // a page. The callback/code exchange is broker-owned and is
+                // intentionally not routed through the generic field-fill
+                // executor path.
+                return Err(RpcError::new(
+                    RpcErrorCode::SECURITY_VIOLATION,
+                    "OAuth callback executor is not available",
+                ));
+            }
             ActionKind::AuthenticateTotp => {
                 let seed_bytes =
                     self.provider
@@ -1255,7 +2376,7 @@ impl BrokerState {
                             )
                         })?;
 
-                let generator = secretctl_crypto::TotpGenerator::new();
+                let generator = totp_generator.as_ref().expect("validated TOTP metadata");
                 let (totp_code, _time_step) = generator
                     .generate(seed_bytes.as_bytes(), now.timestamp() as u64)
                     .map_err(|_| {
@@ -1370,6 +2491,10 @@ impl BrokerState {
             },
         )?;
 
+        if let Some(guard) = sensitive_guard.as_mut() {
+            guard.keep_open = true;
+        }
+
         Ok(ExecutorConsumeResult {
             execution_id,
             recipe_id,
@@ -1479,6 +2604,10 @@ impl BrokerState {
             request.completed_at = Some(Utc::now().to_rfc3339());
         }
 
+        if let Some((filter, tab_id)) = self.execution_sensitive_filter(&params.execution_id) {
+            filter.exit_sensitive_window(tab_id);
+        }
+
         Ok(ExecutorResultResult { acknowledged: true })
     }
 
@@ -1488,19 +2617,13 @@ impl BrokerState {
     ) -> Result<ExecutorHeartbeatResult, RpcError> {
         let mut sessions = self.sessions.write().unwrap();
         let session_entry = sessions
-            .entry(params.browser_session_id.clone())
-            .or_insert_with(|| ActiveBrowserSession {
-                session: BrowserSession {
-                    session_id: params.browser_session_id.clone(),
-                    instance_id: secretctl_domain::BrowserInstanceId::new(),
-                    extension_key_id: "ext-packaged-key".to_string(),
-                    profile_id: "default_profile".to_string(),
-                    assurance: "managed".to_string(),
-                    state: BrowserSessionState::Active,
-                    last_heartbeat_at: Utc::now(),
-                },
-                active_tab_count: params.active_tab_count,
-            });
+            .get_mut(&params.browser_session_id)
+            .ok_or_else(|| {
+                RpcError::new(
+                    RpcErrorCode::SESSION_TERMINATED,
+                    "Browser must register before heartbeat",
+                )
+            })?;
         session_entry.session.last_heartbeat_at = Utc::now();
         session_entry.active_tab_count = params.active_tab_count;
         session_entry.session.state = BrowserSessionState::Active;
@@ -1527,6 +2650,20 @@ impl BrokerState {
 
         if stale_session_ids.is_empty() {
             return Ok(0);
+        }
+
+        let stale_windows = {
+            let executions = self.executions.lock().unwrap();
+            executions
+                .iter()
+                .filter(|(_, execution)| stale_session_ids.contains(&execution.browser_session_id))
+                .map(|(execution_id, _)| execution_id.clone())
+                .collect::<Vec<_>>()
+        };
+        for execution_id in stale_windows {
+            if let Some((filter, tab_id)) = self.execution_sensitive_filter(&execution_id) {
+                filter.exit_sensitive_window(tab_id);
+            }
         }
 
         let mut capabilities = self.capabilities.lock().unwrap();
@@ -1663,5 +2800,26 @@ impl BrokerState {
             entry.capability.revoked_reason = Some(reason.to_string());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BrokerState;
+
+    #[test]
+    fn totp_metadata_supports_eight_digits_and_custom_period() {
+        let generator =
+            BrokerState::totp_generator(r#"{"algorithm":"sha1","digits":8,"period_seconds":60}"#)
+                .expect("valid TOTP metadata");
+        assert_eq!(generator.compute_time_step(119), (1, 1));
+    }
+
+    #[test]
+    fn totp_metadata_rejects_unsupported_parameters() {
+        assert!(BrokerState::totp_generator(r#"{"algorithm":"sha256"}"#).is_err());
+        assert!(BrokerState::totp_generator(r#"{"digits":7}"#).is_err());
+        assert!(BrokerState::totp_generator(r#"{"period_seconds":301}"#).is_err());
+        assert!(BrokerState::totp_generator("not-json").is_err());
     }
 }

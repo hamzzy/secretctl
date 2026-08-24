@@ -13,6 +13,18 @@ if (!principalId) {
   throw new Error("SECRETCTL_PRINCIPAL_ID must identify an enrolled agent");
 }
 
+const ACTIONS = new Set<SecretAction>([
+  "authenticate.password", "authenticate.totp", "form.sensitive_fill", "oauth.authorize",
+]);
+const TOOL_KEYS: Record<string, Set<string>> = {
+  secretctl_execute: new Set([
+    "requestId", "action", "identity", "origin", "pathPrefix",
+    "browserSessionId", "reason", "timeoutMs",
+  ]),
+  secretctl_action_status: new Set(["requestId"]),
+  secretctl_cancel_action: new Set(["requestId", "reason"]),
+};
+
 const server = new Server(
   { name: "secretctl", version: "0.1.0" },
   { capabilities: { tools: {} } },
@@ -29,13 +41,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           action: {
             type: "string",
-            enum: ["authenticate.password", "authenticate.totp", "form.sensitive_fill"],
+            enum: ["authenticate.password", "authenticate.totp", "form.sensitive_fill", "oauth.authorize"],
           },
+          requestId: { type: "string", minLength: 1 },
           identity: { type: "string" },
           origin: { type: "string" },
           pathPrefix: { type: "string" },
           browserSessionId: { type: "string" },
           reason: { type: "string", maxLength: 500 },
+          timeoutMs: { type: "integer", minimum: 1, maximum: 120000 },
         },
         required: ["action", "identity", "origin", "browserSessionId", "reason"],
       },
@@ -74,15 +88,26 @@ function requiredString(args: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function validateArguments(tool: string, args: Record<string, unknown>): void {
+  const allowed = TOOL_KEYS[tool];
+  if (!allowed) throw new Error("Unknown secretctl tool");
+  const unknown = Object.keys(args).find((key) => !allowed.has(key));
+  if (unknown) throw new Error("Unknown tool argument");
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+  validateArguments(request.params.name, args);
   const client = await SecretCtl.connect({ principalId });
   try {
     let result: unknown;
     switch (request.params.name) {
       case "secretctl_execute":
+        const action = requiredString(args, "action") as SecretAction;
+        if (!ACTIONS.has(action)) throw new Error("Unsupported secretctl action");
         result = await client.execute({
-          action: requiredString(args, "action") as SecretAction,
+          requestId: typeof args.requestId === "string" ? args.requestId : undefined,
+          action,
           identity: requiredString(args, "identity"),
           target: {
             origin: requiredString(args, "origin"),
@@ -91,6 +116,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           },
           browserSessionId: requiredString(args, "browserSessionId"),
           reason: requiredString(args, "reason"),
+          timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
         });
         break;
       case "secretctl_action_status":
@@ -108,7 +134,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       default:
         throw new Error("Unknown secretctl tool");
     }
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    const structuredContent = result && typeof result === "object"
+      ? result as Record<string, unknown> : { result };
+    return {
+      content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+      structuredContent,
+    };
   } finally {
     client.close();
   }

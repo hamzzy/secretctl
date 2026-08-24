@@ -35,7 +35,7 @@ class ExecuteRequest(StrictModel):
 
 class ExecuteResult(StrictModel):
     status: Literal[
-        "completed", "capability_issued", "denied", "expired", "cancelled", "failed"
+        "completed", "capability_issued", "denied", "expired", "cancelled", "indeterminate", "revoked", "failed"
     ]
     request_id: str
     action: Optional[str] = None
@@ -43,6 +43,7 @@ class ExecuteResult(StrictModel):
     verified_origin: Optional[str] = None
     browser_session_id: Optional[str] = None
     evidence_id: Optional[str] = None
+    grant_id: Optional[str] = None
     code: Optional[str] = None
     safe_message: Optional[str] = None
     completed_at: Optional[str] = None
@@ -52,3 +53,10 @@ class ActionStatus(StrictModel):
     request_id: str
     state: str
     detail: Optional[str] = None
+
+
+class SessionInfo(StrictModel):
+    protocol_version: str
+    principal_id: str
+    role: Literal["agent"]
+    rekey_after_seconds: int

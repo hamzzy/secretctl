@@ -14,7 +14,12 @@ use secretctl_protocol::{
     LengthPrefixedCodec, RpcRequest, RpcResponse, SessionAuthenticateParams, SessionHelloParams,
     SessionHelloResult, session_auth_transcript,
 };
-use secretctl_provider_macos::MacOsKeychainProvider;
+#[cfg(target_os = "linux")]
+use secretctl_provider_linux::LinuxSecretServiceProvider as PlatformSecretProvider;
+#[cfg(target_os = "macos")]
+use secretctl_provider_macos::MacOsKeychainProvider as PlatformSecretProvider;
+#[cfg(target_os = "windows")]
+use secretctl_provider_windows::WindowsCredentialManagerProvider as PlatformSecretProvider;
 use secretctl_providers::SecretProvider;
 use secretctl_store::SqliteStore;
 use std::collections::HashMap;
@@ -51,6 +56,11 @@ enum Commands {
     Status {
         #[arg(long)]
         json: bool,
+    },
+    /// Install and control the managed Chromium runtime.
+    Browser {
+        #[command(subcommand)]
+        command: BrowserCommands,
     },
     /// Manage external credential providers
     Provider {
@@ -135,12 +145,41 @@ enum Commands {
     /// Show comprehensive 11-point security health diagnostics
     #[command(alias = "health")]
     Doctor,
+    /// Create a consistent snapshot backup of the metadata database
+    Backup {
+        #[arg(long, help = "Output backup destination path")]
+        output: Option<PathBuf>,
+    },
+    /// Restore the metadata database from a snapshot backup
+    Restore {
+        #[arg(long, help = "Input backup source path")]
+        from: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum ProviderCommands {
     /// List available and configured credential providers
     List,
+}
+
+#[derive(Subcommand, Debug)]
+enum BrowserCommands {
+    /// Enroll and install the packaged Chrome native-messaging host.
+    InstallHost,
+    /// Launch Chrome with a private debugging pipe and the pinned extension.
+    Launch {
+        #[arg(long)]
+        chrome: Option<PathBuf>,
+        #[arg(long, default_value = "extension")]
+        extension: PathBuf,
+        #[arg(long)]
+        profile: Option<PathBuf>,
+        #[arg(long)]
+        headless: bool,
+    },
+    /// Close a daemon-owned managed browser instance.
+    Close { instance_id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -162,6 +201,11 @@ enum AgentCommands {
     List {
         #[arg(long)]
         json: bool,
+    },
+    #[command(hide = true)]
+    Sign {
+        #[arg(long)]
+        digest: String,
     },
 }
 
@@ -306,7 +350,7 @@ struct AdminClient {
 
 impl AdminClient {
     async fn connect(secretctl_dir: &Path) -> anyhow::Result<Self> {
-        let provider = MacOsKeychainProvider::new();
+        let provider = PlatformSecretProvider::new();
         let signing_secret = provider.get_secret(SIGNING_KEY_LOCATOR).await?;
         let signing_key = KeyPair::from_bytes(signing_secret.as_bytes())?;
         let pinned_public = tokio::fs::read(secretctl_dir.join("broker_key.pub")).await?;
@@ -329,7 +373,8 @@ impl AdminClient {
             .next()
             .await
             .ok_or_else(|| anyhow::anyhow!("daemon closed during hello"))??;
-        let hello_response: RpcResponse<SessionHelloResult> = serde_json::from_slice(&hello_wire)?;
+        let hello_response: RpcResponse<SessionHelloResult> =
+            secretctl_protocol::from_slice_strict(&hello_wire)?;
         let server = hello_response
             .result
             .ok_or_else(|| anyhow::anyhow!("daemon rejected admin hello"))?;
@@ -370,7 +415,8 @@ impl AdminClient {
             .next()
             .await
             .ok_or_else(|| anyhow::anyhow!("daemon closed during authentication"))??;
-        let auth_response: RpcResponse<serde_json::Value> = serde_json::from_slice(&auth_wire)?;
+        let auth_response: RpcResponse<serde_json::Value> =
+            secretctl_protocol::from_slice_strict(&auth_wire)?;
         anyhow::ensure!(
             auth_response.error.is_none(),
             "daemon rejected admin authentication"
@@ -403,7 +449,7 @@ impl AdminClient {
             .await
             .ok_or_else(|| anyhow::anyhow!("daemon closed admin session"))??;
         let response: RpcResponse<serde_json::Value> =
-            serde_json::from_slice(&self.channel.decrypt(&response_wire)?)?;
+            secretctl_protocol::from_slice_strict(&self.channel.decrypt(&response_wire)?)?;
         if let Some(error) = response.error {
             anyhow::bail!("{} ({})", error.message, error.code);
         }
@@ -435,6 +481,43 @@ fn daemon_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("secretctld"))
 }
 
+fn native_host_binary() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("secretctl-native-host"))
+        })
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from("secretctl-native-host"))
+}
+
+fn platform_provider_label() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macOS Keychain"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Windows Credential Manager"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Linux Secret Service"
+    }
+}
+
+fn default_chrome_binary() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PathBuf::from("google-chrome")
+    }
+}
+
 async fn prompt_secret(prompt: &'static str) -> anyhow::Result<zeroize::Zeroizing<String>> {
     Ok(zeroize::Zeroizing::new(
         tokio::task::spawn_blocking(move || rpassword::prompt_password(prompt)).await??,
@@ -443,7 +526,7 @@ async fn prompt_secret(prompt: &'static str) -> anyhow::Result<zeroize::Zeroizin
 
 async fn load_audit_keys(
     store: &SqliteStore,
-    provider: &MacOsKeychainProvider,
+    provider: &PlatformSecretProvider,
 ) -> anyhow::Result<HashMap<u32, Vec<u8>>> {
     let mut keys = HashMap::new();
     for (version, locator, _) in store.audit_key_versions()? {
@@ -455,7 +538,7 @@ async fn load_audit_keys(
 
 async fn verify_audit(
     store: &SqliteStore,
-    provider: &MacOsKeychainProvider,
+    provider: &PlatformSecretProvider,
 ) -> anyhow::Result<usize> {
     let events = store.list_audit_events()?;
     let audit_keys = load_audit_keys(store, provider).await?;
@@ -538,7 +621,7 @@ async fn run() -> anyhow::Result<()> {
                 )
                 .await?;
             }
-            let provider = MacOsKeychainProvider::new();
+            let provider = PlatformSecretProvider::new();
             let signing_key = if provider.exists(SIGNING_KEY_LOCATOR).await? {
                 let bytes = provider.get_secret(SIGNING_KEY_LOCATOR).await?;
                 KeyPair::from_bytes(bytes.as_bytes())?
@@ -618,13 +701,88 @@ async fn run() -> anyhow::Result<()> {
                 anyhow::bail!("secretctld is unavailable");
             }
         }
+        Commands::Browser { command } => match command {
+            BrowserCommands::InstallHost => {
+                let status = std::process::Command::new(native_host_binary())
+                    .arg("install")
+                    .status()?;
+                anyhow::ensure!(status.success(), "native host installation failed");
+            }
+            BrowserCommands::Launch {
+                chrome,
+                extension,
+                profile,
+                headless,
+            } => {
+                let chrome = tokio::fs::canonicalize(chrome.unwrap_or_else(default_chrome_binary))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Chrome binary not found"))?;
+                let extension = tokio::fs::canonicalize(extension)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("packaged extension directory not found"))?;
+                let native_host_binary = tokio::fs::canonicalize(native_host_binary())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("native host binary not found"))?;
+                let mut admin = AdminClient::connect(&secretctl_dir).await?;
+                let launched: secretctl_protocol::BrowserLaunchResult = serde_json::from_value(
+                    admin
+                        .call(
+                            "browser.launch",
+                            serde_json::json!({
+                                "chrome_binary": chrome,
+                                "extension_path": extension,
+                                "native_host_binary": native_host_binary,
+                                "profile_dir": profile,
+                                "headless": headless
+                            }),
+                        )
+                        .await?,
+                )?;
+                for attempt in 0..80 {
+                    let status: secretctl_protocol::BrowserLaunchResult = serde_json::from_value(
+                        admin
+                            .call(
+                                "browser.launch_status",
+                                serde_json::json!({"instance_id": launched.instance_id}),
+                            )
+                            .await?,
+                    )?;
+                    if let Some(session_id) = status.browser_session_id {
+                        println!("Managed browser ready");
+                        println!("Instance ID: {}", status.instance_id);
+                        println!("Browser session ID: {session_id}");
+                        println!("Gateway: {}", status.gateway_endpoint);
+                        return Ok(());
+                    }
+                    if attempt == 79 {
+                        for diagnostic in status.diagnostics.iter().take(20) {
+                            eprintln!("Chrome: {diagnostic}");
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                anyhow::bail!(
+                    "managed extension did not attest within 20 seconds; install the native host first"
+                );
+            }
+            BrowserCommands::Close { instance_id } => {
+                let mut admin = AdminClient::connect(&secretctl_dir).await?;
+                admin
+                    .call(
+                        "browser.close",
+                        serde_json::json!({"instance_id": instance_id}),
+                    )
+                    .await?;
+                println!("closed managed browser {instance_id}");
+            }
+        },
         Commands::Provider { command } => match command {
             ProviderCommands::List => {
                 println!("Credential Providers");
-                #[cfg(target_os = "macos")]
-                println!("  ✓ macOS Keychain (active: local OS keychain provider)");
-                #[cfg(not(target_os = "macos"))]
-                println!("  ○ macOS Keychain (unsupported on this platform)");
+                println!(
+                    "  ✓ {} (active: local OS keychain provider)",
+                    platform_provider_label()
+                );
                 println!("  ○ 1Password (CLI / Connect API provider)");
                 println!("  ○ Bitwarden (CLI / Secrets Manager)");
                 println!("  ○ HashiCorp Vault (AppRole / Token)");
@@ -637,7 +795,7 @@ async fn run() -> anyhow::Result<()> {
                 AgentCommands::Create { name } => {
                     let agent_key = KeyPair::generate();
                     let agent_id = AgentId::new();
-                    let provider = MacOsKeychainProvider::new();
+                    let provider = PlatformSecretProvider::new();
                     let key_locator = format!("agent-signing-{agent_id}");
                     provider
                         .store_secret(&key_locator, &agent_key.to_bytes())
@@ -725,6 +883,30 @@ async fn run() -> anyhow::Result<()> {
                             println!("{}\t{}\t{}", agent.agent_id, agent.role, agent.display_name);
                         }
                     }
+                }
+                AgentCommands::Sign { digest } => {
+                    let principal_id = std::env::var("SECRETCTL_PRINCIPAL_ID").map_err(|_| {
+                        anyhow::anyhow!("agent signer is available only under secretctl run")
+                    })?;
+                    let locator = std::env::var("SECRETCTL_SIGNING_KEY_LOCATOR")
+                        .map_err(|_| anyhow::anyhow!("agent signing locator unavailable"))?;
+                    anyhow::ensure!(
+                        locator == format!("agent-signing-{principal_id}")
+                            && store.get_enrolled_agent(&principal_id)?.role == "agent",
+                        "agent signer identity rejected"
+                    );
+                    let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(digest)?;
+                    anyhow::ensure!(
+                        digest.len() == 32,
+                        "agent signer accepts only a SHA-256 digest"
+                    );
+                    let provider = PlatformSecretProvider::new();
+                    let secret = provider.get_secret(&locator).await?;
+                    let key = KeyPair::from_bytes(secret.as_bytes())?;
+                    println!(
+                        "{}",
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.sign(&digest))
+                    );
                 }
             }
         }
@@ -876,7 +1058,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Commands::Credential { command } => {
             let store = SqliteStore::open(&db_path)?;
-            let provider = MacOsKeychainProvider::new();
+            let provider = PlatformSecretProvider::new();
             match command {
                 CredentialCommands::Add {
                     name,
@@ -1105,7 +1287,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Commands::Audit { command } => {
             let store = SqliteStore::open(&db_path)?;
-            let provider = MacOsKeychainProvider::new();
+            let provider = PlatformSecretProvider::new();
             match command {
                 AuditCommands::Verify => {
                     let count = verify_audit(&store, &provider).await?;
@@ -1134,7 +1316,7 @@ async fn run() -> anyhow::Result<()> {
                 "stop secretctld before rotating keys"
             );
             let store = SqliteStore::open(&db_path)?;
-            let provider = MacOsKeychainProvider::new();
+            let provider = PlatformSecretProvider::new();
             verify_audit(&store, &provider).await?;
             let old_signing_id = store
                 .active_signing_key_id()?
@@ -1206,7 +1388,7 @@ async fn run() -> anyhow::Result<()> {
             println!("secretctl doctor");
             let db_path = secretctl_dir.join("secretctl.db");
             let db_ok = db_path.exists();
-            let provider = MacOsKeychainProvider::new();
+            let provider = PlatformSecretProvider::new();
             let keychain_ok = provider.exists(SIGNING_KEY_LOCATOR).await.unwrap_or(false);
             let admin_sock = secretctl_dir.join("run/admin.sock");
             let agent_sock = secretctl_dir.join("run/agent.sock");
@@ -1215,6 +1397,18 @@ async fn run() -> anyhow::Result<()> {
             let daemon_ok = admin_sock.exists();
             let executor_channel_ok = executor_sock.exists() || daemon_ok;
             let agent_channel_ok = agent_sock.exists() || daemon_ok;
+            let native_config_ok = tokio::fs::read(secretctl_dir.join("native-host.json"))
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|config| {
+                    config
+                        .get("extension_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some(secretctl_protocol::MANAGED_EXTENSION_ID);
 
             println!(
                 "{:<24} {}",
@@ -1227,14 +1421,22 @@ async fn run() -> anyhow::Result<()> {
             );
             println!(
                 "{:<24} {}",
-                "macOS Keychain",
+                platform_provider_label(),
                 if keychain_ok {
                     "✓"
                 } else {
                     "○ (run secretctl init)"
                 }
             );
-            println!("{:<24} ○ (M2)", "Chrome extension");
+            println!(
+                "{:<24} {}",
+                "Chrome extension",
+                if native_config_ok {
+                    "✓ (pinned identity)"
+                } else {
+                    "○ (run secretctl browser install-host)"
+                }
+            );
             println!(
                 "{:<24} {}",
                 "Executor channel",
@@ -1245,9 +1447,13 @@ async fn run() -> anyhow::Result<()> {
                 "Agent channel",
                 if agent_channel_ok { "✓" } else { "○" }
             );
-            println!("{:<24} ○ (M2)", "Browser origin checks");
-            println!("{:<24} ○ (M2)", "Sensitive mode");
-            println!("{:<24} ○ (M2)", "CDP filtering");
+            println!(
+                "{:<24} {}",
+                "Browser origin checks",
+                if native_config_ok { "✓" } else { "○" }
+            );
+            println!("{:<24} ✓ (fail closed)", "Sensitive mode");
+            println!("{:<24} ✓ (private pipe)", "CDP filtering");
             println!("{:<24} ✓", "Capability signing");
             println!("{:<24} ✓", "Capability replay");
             println!("{:<24} ✓", "Audit redaction");
@@ -1260,6 +1466,38 @@ async fn run() -> anyhow::Result<()> {
                     "REQUIRES_INIT"
                 }
             );
+        }
+        Commands::Backup { output } => {
+            let db_path = secretctl_dir.join("secretctl.db");
+            anyhow::ensure!(
+                db_path.exists(),
+                "database does not exist; run `secretctl init` first"
+            );
+            let store = SqliteStore::open(&db_path)?;
+            let dest_path = output.unwrap_or_else(|| {
+                let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+                secretctl_dir.join(format!("secretctl_backup_{timestamp}.db"))
+            });
+            if let Some(parent) = dest_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            store.create_backup(&dest_path)?;
+            println!("✓ Backup created at {}", dest_path.display());
+        }
+        Commands::Restore { from } => {
+            anyhow::ensure!(
+                from.exists(),
+                "backup source file does not exist at {}",
+                from.display()
+            );
+            anyhow::ensure!(
+                !run_dir.join("admin.sock").exists(),
+                "stop secretctld before restoring a database backup (`secretctl stop`)"
+            );
+            let db_path = secretctl_dir.join("secretctl.db");
+            let store = SqliteStore::open(&db_path)?;
+            store.restore_from_backup(&from)?;
+            println!("✓ Restored database from {}", from.display());
         }
     }
     Ok(())
@@ -1306,7 +1544,6 @@ mod tests {
             "secretctl",
             "credential",
             "add",
-            "--name",
             "github-work",
             "--type",
             "password",

@@ -1,0 +1,30 @@
+{
+  "recipe_id": "rcp_m2_local_login",
+  "version": 1,
+  "name": "M2 local login fixture",
+  "action": "authenticate.password",
+  "match": {
+    "top_origin": "http://127.0.0.1:8765",
+    "path_prefix": "/m2-login.html",
+    "frame_origin": "http://127.0.0.1:8765"
+  },
+  "fields": [
+    {
+      "role": "password",
+      "selector": "#password",
+      "optional": false,
+      "clear_first": true
+    }
+  ],
+  "submit": {
+    "selector": "#submit",
+    "auto_submit": true,
+    "delay_ms": 0
+  },
+  "success_indicators": {
+    "navigation_origin": null,
+    "selector_present": "#result:not([hidden])",
+    "selector_absent": null,
+    "timeout_ms": 3000
+  }
+}

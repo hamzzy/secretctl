@@ -9,8 +9,9 @@ use secretctl_policy::{
     DestinationRule, PolicyDocument, PolicyEvaluator, PolicyRule, RuleConditions,
 };
 use secretctl_protocol::{
-    ActionRequestParams, ExecutorConsumeParams, ExecutorContextPayload, ExecutorPrepareParams,
-    ExecutorResultParams, TargetOriginConstraint,
+    ActionRequestParams, BrowserRegisterParams, ExecutionNextParams, ExecutorConsumeParams,
+    ExecutorContextPayload, ExecutorHeartbeatParams, ExecutorPrepareParams, ExecutorResultParams,
+    TargetOriginConstraint,
 };
 use secretctl_providers::{MemorySecretProvider, SecretProvider};
 use secretctl_store::SqliteStore;
@@ -113,6 +114,7 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         }],
         submit: None,
         success_indicators: None,
+        oauth: None,
         content_hash: vec![1, 2, 3],
         enabled: true,
     };
@@ -135,6 +137,7 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         }],
         submit: None,
         success_indicators: None,
+        oauth: None,
         content_hash: vec![4, 5, 6],
         enabled: true,
     });
@@ -156,6 +159,7 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         }],
         submit: None,
         success_indicators: None,
+        oauth: None,
         content_hash: vec![7, 8, 9],
         enabled: true,
     });
@@ -190,6 +194,81 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
     );
 
     (state, session_id, origin)
+}
+
+#[tokio::test]
+async fn managed_registration_is_required_before_heartbeat() {
+    let (broker, _, _) = setup_test_broker().await;
+    let unknown = BrowserSessionId::new();
+    let heartbeat = broker
+        .handle_executor_heartbeat(ExecutorHeartbeatParams {
+            browser_session_id: unknown,
+            active_tab_count: 1,
+            timestamp: Utc::now().to_rfc3339(),
+        })
+        .await;
+    assert_eq!(
+        heartbeat.expect_err("heartbeat must not self-enroll").code,
+        secretctl_protocol::RpcErrorCode::SESSION_TERMINATED.0
+    );
+
+    let registered = broker
+        .handle_browser_register(BrowserRegisterParams {
+            instance_id: secretctl_domain::BrowserInstanceId::new(),
+            launcher_nonce: "0123456789abcdef0123456789abcdef".to_string(),
+            profile_id: "managed-profile".to_string(),
+            extension_id: secretctl_protocol::MANAGED_EXTENSION_ID.to_string(),
+            extension_version: "1.0.0".to_string(),
+            extension_key_id: secretctl_protocol::MANAGED_EXTENSION_ID.to_string(),
+            browser_version: "Mozilla/5.0 Chrome/140.0.0.0".to_string(),
+        })
+        .expect("valid attestation");
+    assert_eq!(registered.assurance, "managed");
+}
+
+#[tokio::test]
+async fn execution_offer_is_public_plan_only_and_is_delivered_once() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin,
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id.clone(),
+                tab_hint: Some(1),
+                reason: "offer test".to_string(),
+                wait: false,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    let first = broker
+        .handle_execution_next(ExecutionNextParams {
+            browser_session_id: session_id.clone(),
+        })
+        .unwrap();
+    let offer = first.offer.expect("one pending offer");
+    let json = serde_json::to_string(&offer).unwrap();
+    assert!(!json.contains("super_secret_password_123"));
+    assert!(!json.contains("encrypted_value"));
+    assert_eq!(offer.fields.len(), 1);
+    assert!(
+        broker
+            .handle_execution_next(ExecutionNextParams {
+                browser_session_id: session_id
+            })
+            .unwrap()
+            .offer
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -558,7 +637,7 @@ async fn test_totp_execution_flow() {
         .handle_executor_consume(ExecutorConsumeParams {
             capability_token: token,
             session_signature: "mock-sig".to_string(),
-            current_context: context,
+            current_context: context.clone(),
         })
         .await
         .expect("consume should succeed");
@@ -571,6 +650,51 @@ async fn test_totp_execution_flow() {
             .encrypted_value
             .chars()
             .all(|c| c.is_ascii_digit())
+    );
+
+    // A new capability in the same 30-second step cannot issue the same TOTP
+    // again, even though it has a different request and capability ID.
+    let duplicate_request_id = RequestId::new();
+    broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: duplicate_request_id.clone(),
+                action: ActionKind::AuthenticateTotp,
+                identity: "github-totp".to_string(),
+                target: TargetOriginConstraint {
+                    origin: origin.clone(),
+                    path_prefix: None,
+                },
+                browser_session_id: session_id,
+                tab_hint: Some(1),
+                reason: "Duplicate TOTP step check".to_string(),
+                wait: true,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .expect("second TOTP request may be authorized");
+    let duplicate_token = {
+        let caps = broker.capabilities.lock().unwrap();
+        caps.values()
+            .find(|entry| entry.claims.req_id == duplicate_request_id)
+            .unwrap()
+            .token
+            .clone()
+    };
+    let duplicate = broker
+        .handle_executor_consume(ExecutorConsumeParams {
+            capability_token: duplicate_token,
+            session_signature: "mock-sig".to_string(),
+            current_context: context,
+        })
+        .await;
+    assert!(duplicate.is_err());
+    assert_eq!(
+        duplicate.unwrap_err().code,
+        secretctl_protocol::RpcErrorCode::CAPABILITY_CONSUMED.0
     );
 }
 

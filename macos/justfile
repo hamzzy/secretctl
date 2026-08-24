@@ -1,0 +1,58 @@
+# secretctl macOS app — task recipes.
+
+default:
+    @just --list
+
+# Build the SwiftPM products.
+build:
+    swift build
+
+# Run every test, including the live ones against a throwaway broker.
+test: live-fixture
+    swift test
+
+# Run only the tests that need no Rust toolchain.
+test-swift:
+    swift test --skip LiveDecisionTests
+
+# Build the throwaway broker the live decision tests drive.
+# Without it those tests skip rather than fail.
+live-fixture:
+    cd Tools/live-broker && cargo build --quiet
+
+# Render the app icon set and .icns from the vector source.
+icon:
+    mkdir -p build/icon/secretctl.iconset
+    swiftc -O Tools/icon/DrawIcon.swift -o build/icon/drawicon
+    ./build/icon/drawicon build/icon/secretctl.iconset
+    iconutil -c icns build/icon/secretctl.iconset -o build/icon/secretctl.icns
+
+# Assemble and ad-hoc sign build/secretctl.app.
+app:
+    ./build-app.sh release
+
+# Build the app bundle and launch it.
+run: app
+    open build/secretctl.app
+
+# Build the throwaway broker the live decision tests drive.
+live-fixture:
+    cd Tools/live-broker && cargo build
+
+# Unit tests plus the live decision tests against a real broker.
+test-all: live-fixture
+    swift test
+
+# Verify the app's path to the daemon, step by step.
+doctor:
+    swift run secretctl-doctor
+
+# Regenerate the cross-language crypto and DTO vectors from the Rust crates.
+# Run this after any change to secretctl-crypto or the admin DTOs.
+vectors:
+    cd Tools/handshake-vectors && cargo run --quiet > ../../Tests/SecretctlKitTests/Vectors/handshake.json
+    @echo "Vectors regenerated. Run `just test` to check Swift still matches."
+
+clean:
+    swift package clean
+    rm -rf build

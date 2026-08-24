@@ -16,8 +16,8 @@ use base64::Engine;
 use chrono::Utc;
 use secretctl_audit::AuditContext;
 use secretctl_domain::{
-    ActionKind, AgentId, ApprovalId, BrowserSessionState, CapabilityState, ExecutionState,
-    GrantId, MAX_GRANT_TTL_DAYS, MAX_GRANTABLE_RISK, RiskLevel, StandingGrant,
+    ActionKind, AgentId, ApprovalId, BrowserSessionState, CapabilityState, ExecutionState, GrantId,
+    MAX_GRANT_TTL_DAYS, MAX_GRANTABLE_RISK, RiskLevel, StandingGrant,
 };
 use secretctl_protocol::{
     GrantCreateParams, GrantCreateResult, GrantRevokeResult, ReasonSource, RpcError, RpcErrorCode,
@@ -317,10 +317,9 @@ impl BrokerState {
         let executions = self.executions.lock().unwrap();
         let uncertain = executions.values().any(|active| {
             active.execution.state == ExecutionState::Indeterminate
-                && active
-                    .execution
-                    .completed_at
-                    .is_some_and(|at| now - at <= chrono::Duration::seconds(TERMINAL_STATE_LINGER_SECONDS))
+                && active.execution.completed_at.is_some_and(|at| {
+                    now - at <= chrono::Duration::seconds(TERMINAL_STATE_LINGER_SECONDS)
+                })
         });
         drop(executions);
         if uncertain {
@@ -339,10 +338,9 @@ impl BrokerState {
         }
         Ok(match latest.event_type.as_str() {
             "execution.completed" => Some(UiProtectionState::Completed),
-            "execution.failed"
-            | "approval.denied"
-            | "approval.expired"
-            | "capability.revoked" => Some(UiProtectionState::Blocked),
+            "execution.failed" | "approval.denied" | "approval.expired" | "capability.revoked" => {
+                Some(UiProtectionState::Blocked)
+            }
             "approval.invalidated" => Some(UiProtectionState::ProtectionInterrupted),
             _ => None,
         })
@@ -963,16 +961,11 @@ fn summarize_event(event_type: &str, origin: Option<&str>) -> String {
 
 fn classify_event(event_type: &str, decision: Option<&str>) -> UiEventOutcome {
     match event_type {
-        "execution.completed"
-        | "approval.approved"
-        | "approval.auto_granted"
-        | "grant.created" => UiEventOutcome::Success,
-        "approval.denied"
-        | "approval.expired"
-        | "execution.failed"
-        | "capability.revoked"
-        | "agent.disabled"
-        | "grant.revoked" => UiEventOutcome::Denied,
+        "execution.completed" | "approval.approved" | "approval.auto_granted" | "grant.created" => {
+            UiEventOutcome::Success
+        }
+        "approval.denied" | "approval.expired" | "execution.failed" | "capability.revoked"
+        | "agent.disabled" | "grant.revoked" => UiEventOutcome::Denied,
         "approval.requested" => UiEventOutcome::Pending,
         "browser.stale" | "approval.invalidated" => UiEventOutcome::Interrupted,
         // `policy.evaluated` records both allows and denies, so the decision

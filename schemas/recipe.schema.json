@@ -40,7 +40,7 @@
         "required": ["role", "selector"],
         "additionalProperties": false
       },
-      "minItems": 1,
+      "minItems": 0,
       "maxItems": 5
     },
     "submit": {
@@ -61,8 +61,42 @@
         "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 30000 }
       },
       "additionalProperties": false
+    },
+    "oauth": {
+      "type": "object",
+      "properties": {
+        "issuer": { "type": "string" },
+        "authorization_endpoint": { "type": "string", "format": "uri" },
+        "token_endpoint": { "type": "string", "format": "uri" },
+        "client_id": { "type": "string", "minLength": 1 },
+        "redirect_uri": { "type": "string", "format": "uri" },
+        "allowed_scopes": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^\\S+$" },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "required": ["issuer", "authorization_endpoint", "token_endpoint", "client_id", "redirect_uri", "allowed_scopes"],
+      "additionalProperties": false
     }
   },
   "required": ["recipe_id", "version", "name", "action", "match", "fields"],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "action": { "const": "oauth.authorize" } },
+        "required": ["action"]
+      },
+      "then": {
+        "properties": { "fields": { "maxItems": 0 } },
+        "required": ["oauth"]
+      },
+      "else": {
+        "properties": { "fields": { "minItems": 1 } },
+        "not": { "required": ["oauth"] }
+      }
+    }
+  ],
   "additionalProperties": false
 }

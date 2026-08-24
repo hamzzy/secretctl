@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="secretctl" Manufacturer="secretctl" Version="0.1.0" UpgradeCode="9D534EC0-BEE6-45BE-A61A-E676E992E29C" Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="A newer secretctl is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="secretctl">
+        <Component Id="Binaries" Guid="9CD588D9-E429-4674-B335-113650A6CB95">
+          <File Id="SecretctlExe" Source="$(var.BuildDir)\secretctl.exe" />
+          <File Id="SecretctldExe" Source="$(var.BuildDir)\secretctld.exe" />
+          <File Id="NativeHostExe" Source="$(var.BuildDir)\secretctl-native-host.exe" />
+          <RegistryValue Root="HKCU" Key="Software\Google\Chrome\NativeMessagingHosts\com.secretctl.native_host" Type="string" Value="[INSTALLFOLDER]com.secretctl.native_host.json" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <CustomAction Id="InstallNativeHost" FileRef="NativeHostExe" ExeCommand="install" Execute="deferred" Impersonate="yes" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="InstallNativeHost" After="InstallFiles" Condition="NOT Installed" />
+    </InstallExecuteSequence>
+    <Feature Id="Complete"><ComponentRef Id="Binaries" /></Feature>
+  </Package>
+</Wix>

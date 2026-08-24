@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 use secretctl_domain::{
     ActionKind, AgentId, AgentPrincipal, Approval, AuditCheckpoint, AuditEvent, CanonicalOrigin,
     Capability, CapabilityId, CapabilitySummary, CredentialDescriptor, CredentialId, EventId,
-    Execution, GrantId, RequestId, RiskLevel, StandingGrant,
+    Execution, GrantId, OAuthGrant, RequestId, RiskLevel, StandingGrant,
 };
 use std::path::Path;
 use std::str::FromStr;
@@ -99,6 +99,33 @@ impl SqliteStore {
         })
     }
 
+    pub fn create_backup<P: AsRef<Path>>(&self, destination_path: P) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut dest_conn = Connection::open(destination_path)?;
+        let backup = rusqlite::backup::Backup::new(&conn, &mut dest_conn)?;
+        backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+        Ok(())
+    }
+
+    pub fn restore_from_backup<P: AsRef<Path>>(&self, source_path: P) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let src_conn = Connection::open(source_path)?;
+        let backup = rusqlite::backup::Backup::new(&src_conn, &mut conn)?;
+        backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+        Ok(())
+    }
+
+    pub fn schema_version(&self) -> Result<i32, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let version: Option<i32> = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .ok()
+            .flatten();
+        Ok(version.unwrap_or(0))
+    }
+
     pub fn insert_agent(&self, agent: &AgentPrincipal) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -106,6 +133,38 @@ impl SqliteStore {
              (agent_id, role, public_key, executable_hash, executable_path, peer_uid,
               display_name, state, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                agent.agent_id.as_str(),
+                agent.role,
+                agent.public_key,
+                agent.executable_hash,
+                agent.executable_path,
+                agent.peer_uid,
+                agent.display_name,
+                agent.state,
+                agent.created_at.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Install-time enrollment for a broker-owned executable. Reinstallation
+    /// rotates the public key and executable attestation as one row update.
+    pub fn upsert_agent(&self, agent: &AgentPrincipal) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents
+             (agent_id, role, public_key, executable_hash, executable_path, peer_uid,
+              display_name, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(agent_id) DO UPDATE SET
+               role = excluded.role,
+               public_key = excluded.public_key,
+               executable_hash = excluded.executable_hash,
+               executable_path = excluded.executable_path,
+               peer_uid = excluded.peer_uid,
+               display_name = excluded.display_name,
+               state = excluded.state",
             params![
                 agent.agent_id.as_str(),
                 agent.role,
@@ -251,6 +310,67 @@ impl SqliteStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// Persist only the opaque provider locator for an OAuth grant. Tokens and
+    /// authorization codes must be stored in the provider, never in SQLite.
+    pub fn insert_oauth_grant(&self, grant: &OAuthGrant) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let scopes = serde_json::to_string(&grant.scopes)
+            .map_err(|error| StoreError::Serialization(error.to_string()))?;
+        conn.execute(
+            "INSERT INTO oauth_grants
+             (grant_id, credential_id, provider_locator, scopes_json, subject_hint, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                grant.grant_id.as_str(),
+                grant.credential_id.as_str(),
+                grant.provider_locator,
+                scopes,
+                grant.subject_hint,
+                grant.created_at.to_rfc3339(),
+                grant.expires_at.map(|value| value.to_rfc3339()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_oauth_grant(&self, grant_id: &GrantId) -> Result<Option<OAuthGrant>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT grant_id, credential_id, provider_locator, scopes_json, subject_hint, created_at, expires_at
+             FROM oauth_grants WHERE grant_id = ?1",
+            [grant_id.as_str()],
+            |row| {
+                let grant_id: String = row.get(0)?;
+                let credential_id: String = row.get(1)?;
+                let scopes: String = row.get(3)?;
+                let created_at: String = row.get(5)?;
+                let expires_at: Option<String> = row.get(6)?;
+                Ok(OAuthGrant {
+                    grant_id: GrantId::parse(&grant_id).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+                    credential_id: CredentialId::parse(&credential_id).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+                    provider_locator: row.get(2)?,
+                    scopes: serde_json::from_str(&scopes).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+                    subject_hint: row.get(4)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?.with_timezone(&chrono::Utc),
+                    expires_at: expires_at.map(|value| chrono::DateTime::parse_from_rfc3339(&value).map(|date| date.with_timezone(&chrono::Utc))).transpose().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+                })
+            },
+        );
+        match result {
+            Ok(grant) => Ok(Some(grant)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn delete_oauth_grant(&self, grant_id: &GrantId) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "DELETE FROM oauth_grants WHERE grant_id = ?1",
+            [grant_id.as_str()],
+        )? == 1)
     }
 
     pub fn insert_approval(&self, approval: &Approval) -> Result<(), StoreError> {
@@ -465,9 +585,28 @@ impl SqliteStore {
         capability_id: &CapabilityId,
         execution: &Execution,
         audit_event: &AuditEvent,
+        totp_step: Option<(&CredentialId, u64)>,
     ) -> Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some((credential_id, time_step)) = totp_step {
+            let claimed = tx.execute(
+                "INSERT OR IGNORE INTO totp_issuances
+                 (credential_id, time_step, execution_id, issued_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    credential_id.as_str(),
+                    time_step,
+                    execution.execution_id.as_str(),
+                    execution.started_at.map(|value| value.to_rfc3339()),
+                ],
+            )?;
+            if claimed != 1 {
+                return Err(StoreError::StateConflict(format!(
+                    "TOTP step already issued for {credential_id}"
+                )));
+            }
+        }
         let changed = tx.execute(
             "UPDATE capabilities
              SET state = 'consumed', used_count = used_count + 1
@@ -555,6 +694,19 @@ impl SqliteStore {
             "UPDATE capabilities SET state = 'revoked', revoked_reason = ?2
              WHERE capability_id = ?1 AND state IN ('issued', 'active')",
             params![capability_id.as_str(), reason],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::StateConflict(capability_id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn consume_oauth_capability(&self, capability_id: &CapabilityId) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE capabilities SET state = 'consumed', used_count = used_count + 1
+             WHERE capability_id = ?1 AND state IN ('issued', 'active') AND used_count < max_uses",
+            [capability_id.as_str()],
         )?;
         if changed != 1 {
             return Err(StoreError::StateConflict(capability_id.to_string()));
@@ -1199,5 +1351,23 @@ mod tests {
         store.insert_audit_event(&audit_event).unwrap();
         let latest_hash = store.get_latest_audit_hash().unwrap();
         assert_eq!(latest_hash, audit_event.event_hash);
+    }
+
+    #[test]
+    fn startup_scan_rejects_secret_bearing_metadata_keys() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .insert_credential(&CredentialDescriptor {
+                credential_id: CredentialId::new(),
+                name: "unsafe-metadata".to_string(),
+                kind: "password".to_string(),
+                provider: "memory".to_string(),
+                provider_locator: "opaque-locator".to_string(),
+                allowed_actions: vec![ActionKind::AuthenticatePassword],
+                metadata_json: r#"{"password":"must-not-be-persisted"}"#.to_string(),
+                disabled_at: None,
+            })
+            .unwrap();
+        assert!(store.validate_no_prohibited_persisted_keys().is_err());
     }
 }

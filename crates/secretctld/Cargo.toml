@@ -22,6 +22,8 @@ secretctl-policy = { workspace = true }
 secretctl-capability = { workspace = true }
 secretctl-providers = { workspace = true }
 secretctl-provider-macos = { workspace = true }
+secretctl-provider-windows = { workspace = true }
+secretctl-provider-linux = { workspace = true }
 secretctl-audit = { workspace = true }
 secretctl-store = { workspace = true }
 secretctl-browser-gateway = { workspace = true }
@@ -39,6 +41,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+url = { workspace = true }
+zeroize = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
