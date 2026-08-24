@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
 
     let db_path = secretctl_dir.join("secretctl.db");
     let store = SqliteStore::open(&db_path)?;
+    store.validate_no_prohibited_persisted_keys()?;
 
     let provider = Arc::new(MacOsKeychainProvider::new());
     let broker_key = if provider
@@ -100,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
             let content = tokio::fs::read_to_string(&path).await?;
+            validate_recipe_metadata_keys(&serde_json::from_str(&content)?, "$recipe")?;
             let mut recipe: secretctl_domain::SiteRecipe = serde_json::from_str(&content)?;
             anyhow::ensure!(
                 (1..=5).contains(&recipe.fields.len()),
@@ -134,17 +136,33 @@ async fn main() -> anyhow::Result<()> {
 
     server.start().await?;
 
-    println!("secretctld daemon started successfully.");
-    println!("Listening on Unix domain sockets in: {:?}", runtime_dir);
-    println!("  - agent:    {:?}", runtime_dir.join("agent.sock"));
-    println!("  - executor: {:?}", runtime_dir.join("executor.sock"));
-    println!("  - admin:    {:?}", runtime_dir.join("admin.sock"));
-    println!("Press Ctrl+C to stop.\n");
+    tracing::info!(?runtime_dir, "secretctld daemon started");
 
     tokio::signal::ctrl_c().await?;
     state
         .write_audit_checkpoint()
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    println!("secretctld shutting down.");
+    tracing::info!("secretctld shutting down");
+    Ok(())
+}
+
+fn validate_recipe_metadata_keys(value: &serde_json::Value, path: &str) -> anyhow::Result<()> {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                anyhow::ensure!(
+                    !secretctl_crypto::contains_prohibited_key_name(key),
+                    "prohibited secret-bearing recipe key at {path}.{key}"
+                );
+                validate_recipe_metadata_keys(value, &format!("{path}.{key}"))?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, value) in items.iter().enumerate() {
+                validate_recipe_metadata_keys(value, &format!("{path}[{index}]"))?;
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }

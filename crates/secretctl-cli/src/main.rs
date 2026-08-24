@@ -1234,7 +1234,7 @@ async fn run() -> anyhow::Result<()> {
                     "○ (run secretctl init)"
                 }
             );
-            println!("{:<24} {}", "Chrome extension", "✓");
+            println!("{:<24} ○ (M2)", "Chrome extension");
             println!(
                 "{:<24} {}",
                 "Executor channel",
@@ -1245,12 +1245,12 @@ async fn run() -> anyhow::Result<()> {
                 "Agent channel",
                 if agent_channel_ok { "✓" } else { "○" }
             );
-            println!("{:<24} {}", "Browser origin checks", "✓");
-            println!("{:<24} {}", "Sensitive mode", "✓");
-            println!("{:<24} {}", "CDP filtering", "✓");
-            println!("{:<24} {}", "Capability signing", "✓");
-            println!("{:<24} {}", "Capability replay", "✓");
-            println!("{:<24} {}", "Audit redaction", "✓");
+            println!("{:<24} ○ (M2)", "Browser origin checks");
+            println!("{:<24} ○ (M2)", "Sensitive mode");
+            println!("{:<24} ○ (M2)", "CDP filtering");
+            println!("{:<24} ✓", "Capability signing");
+            println!("{:<24} ✓", "Capability replay");
+            println!("{:<24} ✓", "Audit redaction");
             println!(
                 "{:<24} {}",
                 "Security boundary",

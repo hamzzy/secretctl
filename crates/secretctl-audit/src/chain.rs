@@ -289,7 +289,10 @@ mod tests {
             "signing-v2".to_string(),
             signing_key.public_key_bytes().to_vec(),
         )]);
-        assert!(verify_audit_checkpoints(&events, &[checkpoint.clone()], &signing_keys).is_ok());
+        assert!(
+            verify_audit_checkpoints(&events, std::slice::from_ref(&checkpoint), &signing_keys)
+                .is_ok()
+        );
 
         let mut tampered = events.clone();
         tampered[0].event_type = "tampered".to_string();

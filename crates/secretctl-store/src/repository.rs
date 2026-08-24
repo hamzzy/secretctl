@@ -38,6 +38,46 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    pub fn validate_no_prohibited_persisted_keys(&self) -> Result<(), StoreError> {
+        fn inspect(value: &serde_json::Value, path: &str) -> Result<(), StoreError> {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    for (key, value) in fields {
+                        if secretctl_crypto::contains_prohibited_key_name(key) {
+                            return Err(StoreError::StateConflict(format!(
+                                "prohibited secret-bearing metadata key at {path}.{key}"
+                            )));
+                        }
+                        inspect(value, &format!("{path}.{key}"))?;
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, value) in items.iter().enumerate() {
+                        inspect(value, &format!("{path}[{index}]"))?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+
+        let conn = self.conn.lock().unwrap();
+        for (table, column) in [
+            ("credentials", "metadata_json"),
+            ("audit_events", "event_json"),
+        ] {
+            let mut statement = conn.prepare(&format!("SELECT {column} FROM {table}"))?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                let document: serde_json::Value = serde_json::from_str(&row?).map_err(|error| {
+                    StoreError::Serialization(format!("invalid {table}.{column}: {error}"))
+                })?;
+                inspect(&document, &format!("{table}.{column}"))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StoreError> {
         let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;

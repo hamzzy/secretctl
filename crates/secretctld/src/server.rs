@@ -1,46 +1,25 @@
 use crate::state::BrokerState;
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use secretctl_domain::{AgentId, ApprovalId, CapabilityId};
+use secretctl_domain::AgentId;
 use secretctl_protocol::{
-    ActionCancelParams, ActionRequestParams, ActionStatusParams, ExecutorConsumeParams,
-    ExecutorHeartbeatParams, ExecutorPrepareParams, ExecutorResultParams, LengthPrefixedCodec,
-    RpcError, RpcErrorCode, RpcRequest, RpcResponse, SessionAuthenticateParams,
-    SessionAuthenticateResult, SessionHelloParams, SessionHelloResult, session_auth_transcript,
+    ActionCancelParams, ActionRequestParams, ActionStatusParams, AgentDisableParams,
+    ApprovalDecideParams, CapabilityListParams, CapabilityRevokeParams, ExecutorConsumeParams,
+    ExecutorHeartbeatParams, ExecutorPrepareParams, ExecutorResultParams, GrantCreateParams,
+    GrantListParams, GrantRevokeParams, LengthPrefixedCodec, PolicyReloadParams, RpcError,
+    RpcErrorCode, RpcRequest, RpcResponse, SessionAuthenticateParams, SessionAuthenticateResult,
+    SessionHelloParams, SessionHelloResult, UiActivityParams, session_auth_transcript,
 };
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
 
+/// Address one pending approval by id.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ApprovalDecideParams {
-    approval_id: ApprovalId,
-    decision: String,
-    context_digest: Vec<u8>,
-    #[serde(default)]
-    presence_verified: bool,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CapabilityListParams {
-    state: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CapabilityRevokeParams {
-    capability_id: CapabilityId,
-    reason: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PolicyReloadParams {
-    policy_yaml: String,
-    expected_hash: String,
+struct ApprovalLookupParams {
+    approval_id: secretctl_domain::ApprovalId,
 }
 
 pub struct BrokerServer {
@@ -379,7 +358,7 @@ async fn verify_peer_identity(
     let executable_path = tokio::task::spawn_blocking(move || -> anyhow::Result<PathBuf> {
         #[cfg(target_os = "linux")]
         {
-            return Ok(std::fs::read_link(format!("/proc/{pid}/exe"))?);
+            Ok(std::fs::read_link(format!("/proc/{pid}/exe"))?)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -387,7 +366,7 @@ async fn verify_peer_identity(
                 .args(["-p", &pid.to_string(), "-o", "comm="])
                 .output()?;
             anyhow::ensure!(output.status.success(), "peer executable lookup failed");
-            return Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()));
+            Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
         }
     })
     .await??;
@@ -689,6 +668,82 @@ async fn handle_admin_connection(stream: UnixStream, state: BrokerState) -> anyh
                 match state.revoke_capability_admin(&params.capability_id, &params.reason) {
                     Ok(()) => RpcResponse::success(id, serde_json::json!({"revoked": true})),
                     Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "ui.status" => match state.ui_status() {
+                Ok(status) => RpcResponse::success(id, serde_json::to_value(status)?),
+                Err(error) => RpcResponse::error(id, error),
+            },
+            "ui.pending" => match state.ui_pending_approvals() {
+                Ok(pending) => RpcResponse::success(id, serde_json::to_value(pending)?),
+                Err(error) => RpcResponse::error(id, error),
+            },
+            // Re-reads one pending request so the approval window can refresh
+            // its context digest immediately before the human commits.
+            "ui.pending_one" => {
+                let params: ApprovalLookupParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.ui_pending_approval(&params.approval_id) {
+                    Ok(request) => RpcResponse::success(id, serde_json::to_value(request)?),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "ui.activity" => {
+                let params: UiActivityParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.ui_activity(params.limit) {
+                    Ok(events) => RpcResponse::success(id, serde_json::to_value(events)?),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "ui.agents" => match state.ui_agents() {
+                Ok(agents) => RpcResponse::success(id, serde_json::to_value(agents)?),
+                Err(error) => RpcResponse::error(id, error),
+            },
+            "ui.credentials" => match state.ui_credentials() {
+                Ok(credentials) => RpcResponse::success(id, serde_json::to_value(credentials)?),
+                Err(error) => RpcResponse::error(id, error),
+            },
+            "ui.browser_sessions" => match state.ui_browser_sessions() {
+                Ok(sessions) => RpcResponse::success(id, serde_json::to_value(sessions)?),
+                Err(error) => RpcResponse::error(id, error),
+            },
+            "grant.list" => {
+                let params: GrantListParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.ui_grants(params.include_revoked) {
+                    Ok(grants) => RpcResponse::success(id, serde_json::to_value(grants)?),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "grant.create" => {
+                let params: GrantCreateParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.ui_create_grant(params) {
+                    Ok(result) => RpcResponse::success(id, serde_json::to_value(result)?),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "grant.revoke" => {
+                let params: GrantRevokeParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match state.ui_revoke_grants(&params.selector, &params.reason) {
+                    Ok(result) => RpcResponse::success(id, serde_json::to_value(result)?),
+                    Err(error) => RpcResponse::error(id, error),
+                }
+            }
+            "agent.disable" => {
+                let params: AgentDisableParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                match AgentId::parse(&params.agent_id) {
+                    Ok(agent_id) => match state.ui_disable_agent(&agent_id) {
+                        Ok(result) => RpcResponse::success(id, serde_json::to_value(result)?),
+                        Err(error) => RpcResponse::error(id, error),
+                    },
+                    Err(_) => RpcResponse::error(
+                        id,
+                        RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown agent"),
+                    ),
                 }
             }
             "policy.reload" => {

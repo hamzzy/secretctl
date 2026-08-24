@@ -47,6 +47,13 @@ pub struct ActiveExecution {
 pub struct AuthorizationContext {
     pub request_id: RequestId,
     pub agent_id: AgentId,
+    /// Enrolled display name for `agent_id`, resolved from the store rather
+    /// than taken from the request, so the approval panel names the principal
+    /// the broker authenticated.
+    pub agent_name: String,
+    /// The agent's own justification text. Untrusted: it is surfaced to the
+    /// human tagged as agent-provided and is never used for matching.
+    pub reason: String,
     pub identity_name: String,
     pub credential: CredentialDescriptor,
     pub action: ActionKind,
@@ -199,6 +206,37 @@ impl BrokerState {
             .insert_audit_event(&event)
             .map_err(|e| RpcError::new(RpcErrorCode::INTERNAL_ERROR, e.to_string()))?;
 
+        cursor.next_sequence += 1;
+        cursor.latest_hash = event.event_hash;
+        Ok(())
+    }
+
+    /// Persist a standing grant and its creation event under one audit cursor
+    /// advance, so a grant can never exist without a trail entry that chains to
+    /// it. Mirrors the transaction discipline used for capability revocation.
+    pub fn insert_standing_grant_audited(
+        &self,
+        grant: &secretctl_domain::StandingGrant,
+        context: &AuditContext,
+    ) -> Result<(), RpcError> {
+        let mut cursor = self.audit_cursor.lock().unwrap();
+        let event = create_audit_event(
+            cursor.next_sequence,
+            &cursor.latest_hash,
+            self.audit_key_version,
+            self.audit_key.as_bytes(),
+            "grant.created",
+            "admin",
+            None,
+            context,
+            Utc::now(),
+        )
+        .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+        self.store
+            .insert_standing_grant_with_audit(grant, &event)
+            .map_err(|_| {
+                RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Grant storage unavailable")
+            })?;
         cursor.next_sequence += 1;
         cursor.latest_hash = event.event_hash;
         Ok(())
@@ -664,9 +702,16 @@ impl BrokerState {
                 })?
         };
 
+        let agent_name = self
+            .store
+            .get_enrolled_agent(agent_id.as_str())
+            .map(|principal| principal.display_name)
+            .unwrap_or_else(|_| agent_id.to_string());
         let authorization = AuthorizationContext {
             request_id: params.request_id.clone(),
             agent_id,
+            agent_name,
+            reason: params.reason.clone(),
             identity_name: params.identity,
             credential,
             action: params.action,

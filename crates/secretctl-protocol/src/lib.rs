@@ -1,9 +1,11 @@
+pub mod admin;
 pub mod agent;
 pub mod error;
 pub mod executor;
 pub mod framing;
 pub mod jsonrpc;
 
+pub use admin::*;
 pub use agent::*;
 pub use error::{ProtocolError, RpcError, RpcErrorCode};
 pub use executor::*;

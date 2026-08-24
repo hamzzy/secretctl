@@ -11,6 +11,7 @@ secretctl-domain = { workspace = true }
 secretctl-crypto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+minicbor = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
