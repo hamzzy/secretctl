@@ -13,4 +13,7 @@ pub enum StoreError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("State conflict: {0}")]
+    StateConflict(String),
 }

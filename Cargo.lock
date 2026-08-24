@@ -1248,6 +1248,7 @@ name = "secretctl-audit"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hmac",
  "proptest",
  "secretctl-crypto",
  "secretctl-domain",
@@ -1294,8 +1295,10 @@ name = "secretctl-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap",
+ "futures",
  "rand 0.8.7",
  "rpassword",
  "secretctl-audit",
@@ -1308,7 +1311,9 @@ dependencies = [
  "secretctl-store",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "zeroize",
@@ -1448,6 +1453,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "rand 0.8.7",
  "secretctl-audit",
  "secretctl-browser-gateway",
  "secretctl-capability",

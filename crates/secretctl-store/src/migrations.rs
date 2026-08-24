@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 2;
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
@@ -179,6 +179,105 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
         )?;
     }
 
+    if version < 3 {
+        tx.execute(
+            "ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'agent'",
+            [],
+        )?;
+        tx.execute("ALTER TABLE agents ADD COLUMN peer_uid INTEGER", [])?;
+        tx.execute("ALTER TABLE agents ADD COLUMN executable_path TEXT", [])?;
+        tx.execute(
+            "ALTER TABLE audit_events ADD COLUMN audit_key_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        tx.execute(
+            "ALTER TABLE capabilities ADD COLUMN signing_key_id TEXT NOT NULL DEFAULT 'legacy'",
+            [],
+        )?;
+        tx.execute("ALTER TABLE capabilities ADD COLUMN policy_hash BLOB", [])?;
+        tx.execute(
+            "ALTER TABLE capabilities ADD COLUMN browser_session_id TEXT",
+            [],
+        )?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS audit_checkpoints (
+                sequence INTEGER PRIMARY KEY,
+                event_hash BLOB NOT NULL,
+                audit_key_version INTEGER NOT NULL,
+                signing_key_id TEXT NOT NULL,
+                signature BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS trusted_signing_keys (
+                key_id TEXT PRIMARY KEY,
+                public_key BLOB NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                retired_at TEXT
+            )",
+            [],
+        )?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS audit_key_versions (
+                version INTEGER PRIMARY KEY,
+                key_locator TEXT UNIQUE NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                retired_at TEXT
+            )",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at, checksum)
+             VALUES (3, datetime('now'), 'v3_m1_durable_keys_and_audit')",
+            [],
+        )?;
+    }
+
+    if version < 4 {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS standing_grants (
+                grant_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                credential_id TEXT NOT NULL,
+                credential_name TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                action TEXT NOT NULL,
+                risk_ceiling TEXT NOT NULL,
+                require_presence INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT,
+                revoked_reason TEXT,
+                last_used_at TEXT,
+                use_count INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+        // One live grant per (agent, credential, origin, action) tuple. Revoked
+        // grants keep their history row, so the uniqueness is partial.
+        tx.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_standing_grants_unique_live
+             ON standing_grants(agent_id, credential_name, origin, action)
+             WHERE revoked_at IS NULL",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_standing_grants_lookup
+             ON standing_grants(agent_id, credential_name, action)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at, checksum)
+             VALUES (4, datetime('now'), 'v4_standing_grants')",
+            [],
+        )?;
+    }
+
     tx.commit()?;
     Ok(())
 }
@@ -200,7 +299,14 @@ mod tests {
             )
             .unwrap();
 
-        // 10 entity tables + 1 schema_migrations = 11 tables
-        assert_eq!(table_count, 11);
+        // 10 entity tables + migrations + three M1 key/checkpoint tables
+        // + standing_grants.
+        assert_eq!(table_count, 15);
+        let version: i32 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
     }
 }

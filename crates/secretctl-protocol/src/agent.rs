@@ -116,3 +116,34 @@ pub struct SessionHelloResult {
     pub server_key_id: String,
     pub signature: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAuthenticateParams {
+    pub client_ephemeral_public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAuthenticateResult {
+    pub authenticated: bool,
+    pub rekey_after_seconds: u64,
+}
+
+pub fn session_auth_transcript(
+    hello: &SessionHelloParams,
+    server_nonce: &str,
+    server_ephemeral_public_key: &[u8; 32],
+    client_ephemeral_public_key: &[u8; 32],
+) -> [u8; 32] {
+    secretctl_crypto::compute_context_digest(&[
+        b"secretctl-session-auth-v1",
+        hello.protocol_version.as_bytes(),
+        hello.role.as_bytes(),
+        hello.principal_id.as_bytes(),
+        hello.client_nonce.as_bytes(),
+        server_nonce.as_bytes(),
+        server_ephemeral_public_key,
+        client_ephemeral_public_key,
+    ])
+}

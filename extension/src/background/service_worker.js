@@ -96,19 +96,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "MEASURE_CONTEXT") {
     const tabId = sender.tab ? sender.tab.id : 0;
     const epoch = tabEpochs.get(tabId) || 1;
-    const origin = sender.origin || (sender.tab ? new URL(sender.tab.url).origin : "https://unknown:443");
+    const frameUrl = new URL(sender.url || sender.tab?.url || "https://unknown.invalid/");
+    const topUrl = new URL(sender.tab?.url || frameUrl.href);
+    const path = frameUrl.pathname;
 
-    sendResponse({
-      browser_session_id: browserSessionId,
-      tab_id: tabId,
-      frame_id: sender.frameId || 0,
-      document_id: "doc_" + tabId + "_" + epoch,
-      navigation_epoch: epoch,
-      top_origin: origin,
-      frame_origin: origin,
-      path_sha256: "dummy-hash",
-      tls: origin.startsWith("https://")
-    });
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(path)).then((digest) => {
+      const pathSha256 = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, "0")
+      ).join("");
+      sendResponse({
+        browser_session_id: browserSessionId,
+        tab_id: tabId,
+        frame_id: sender.frameId || 0,
+        document_id: sender.documentId || "doc_" + tabId + "_" + epoch,
+        navigation_epoch: epoch,
+        top_origin: topUrl.origin,
+        frame_origin: frameUrl.origin,
+        path,
+        path_sha256: pathSha256,
+        tls: frameUrl.protocol === "https:"
+      });
+    }).catch(() => sendResponse({ error: "Unable to measure page path" }));
     return true;
   }
 

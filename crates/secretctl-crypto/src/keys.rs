@@ -84,7 +84,7 @@ pub struct EphemeralX25519 {
 
 impl EphemeralX25519 {
     pub fn new() -> Self {
-        let secret = EphemeralSecret::random_from_rng(&mut OsRng);
+        let secret = EphemeralSecret::random_from_rng(OsRng);
         let public = XPublicKey::from(&secret);
         Self { secret, public }
     }
@@ -112,7 +112,7 @@ pub struct StaticX25519 {
 
 impl StaticX25519 {
     pub fn generate() -> Self {
-        let secret = StaticSecret::random_from_rng(&mut OsRng);
+        let secret = StaticSecret::random_from_rng(OsRng);
         Self { secret }
     }
 

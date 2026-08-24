@@ -11,6 +11,7 @@ pub struct ExecutorContextPayload {
     pub navigation_epoch: u64,
     pub top_origin: CanonicalOrigin,
     pub frame_origin: CanonicalOrigin,
+    pub path: String,
     pub path_sha256: String,
     pub tls: bool,
     #[serde(default)]

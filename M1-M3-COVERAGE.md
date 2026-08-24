@@ -12,11 +12,14 @@ as an acceptance pass.
 - Action requests resolve stored credential metadata and allowed actions rather
   than treating the public identity name as a keychain locator.
 - Broker decisions use a fresh page context measured by the browser runtime.
+  Requested, policy, and recipe path constraints are evaluated against the
+  executor-measured URL path; only its SHA-256 digest is retained for audit.
   Capabilities bind the extension key, session, tab, frame, document,
   navigation epoch, exact origins, recipe/hash, and policy hash.
 - Missing or disabled recipes fail closed. Recipe selectors, field roles, and
   submit behavior now drive executor output; the broker no longer invents
-  selectors.
+  selectors. Runtime recipe deserialization now matches the published nested
+  schema and rejects unknown keys.
 - Request IDs are idempotent for identical requests and conflict when reused
   with different parameters.
 - Required approvals have persisted pending/approved/denied/expired state,
@@ -94,9 +97,9 @@ Release blockers:
 
 - The SDKs do not yet complete client nonce signing, encrypted IPC, reconnect,
   subscriptions/event ordering, or live broker contract fixtures.
-- TOTP near-boundary waiting and duplicate-step issuance limits are not broker
-  coordinated. Sensitive-form plaintext values are serialized on the executor
-  RPC instead of a one-time encrypted envelope.
+- TOTP near-boundary waiting is broker coordinated, but duplicate-step issuance
+  limits are not durably tracked. Sensitive-form plaintext values are serialized
+  on the executor RPC instead of a one-time encrypted envelope.
 - There are no extension/browser side-channel E2E canary tests for TOTP or
   multi-field forms and no live Python/MCP managed-browser acceptance run.
   Consequently AT-02 and AT-11 are not acceptance passes.

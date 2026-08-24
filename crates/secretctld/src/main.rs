@@ -1,3 +1,4 @@
+use rand::RngCore;
 use secretctl_crypto::KeyPair;
 use secretctl_policy::{PolicyDocument, PolicyEvaluator};
 use secretctl_provider_macos::MacOsKeychainProvider;
@@ -16,25 +17,15 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Starting secretctld daemon...");
 
-    let home_dir = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let secretctl_dir = PathBuf::from(home_dir).join(".secretctl");
+    let secretctl_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("secretctl");
     tokio::fs::create_dir_all(&secretctl_dir).await?;
 
     let db_path = secretctl_dir.join("secretctl.db");
     let store = SqliteStore::open(&db_path)?;
-
-    if !store.agent_exists("agent_default").unwrap_or(false) {
-        let agent_key = KeyPair::generate();
-        let default_agent = secretctl_domain::AgentPrincipal {
-            agent_id: secretctl_domain::AgentId::new(),
-            public_key: agent_key.public_key_bytes().to_vec(),
-            display_name: "agent_default".to_string(),
-            executable_hash: None,
-            state: "enrolled".to_string(),
-            created_at: chrono::Utc::now(),
-        };
-        let _ = store.insert_agent(&default_agent);
-    }
 
     let provider = Arc::new(MacOsKeychainProvider::new());
     let broker_key = if provider
@@ -55,95 +46,91 @@ async fn main() -> anyhow::Result<()> {
         keypair
     };
 
-    let default_policy = PolicyDocument {
-        version: "1.0".to_string(),
-        rules: vec![secretctl_policy::PolicyRule {
-            id: secretctl_domain::RuleId::parse("rule_default_dev").unwrap(),
-            description: Some("Default local development policy".to_string()),
-            effect: secretctl_domain::PolicyEffect::Allow,
-            principals: vec!["*".to_string()],
-            credentials: vec!["*".to_string()],
-            actions: vec![
-                secretctl_domain::ActionKind::AuthenticatePassword,
-                secretctl_domain::ActionKind::AuthenticateTotp,
-                secretctl_domain::ActionKind::FormSensitiveFill,
-            ],
-            destinations: vec![
-                secretctl_policy::DestinationRule {
-                    origin: secretctl_domain::CanonicalOrigin::parse("https://github.com:443")
-                        .unwrap(),
-                    path_prefix: None,
-                },
-                secretctl_policy::DestinationRule {
-                    origin: secretctl_domain::CanonicalOrigin::parse("https://localhost:443")
-                        .unwrap(),
-                    path_prefix: None,
-                },
-            ],
-            conditions: secretctl_policy::RuleConditions {
-                browser_assurance: Some("managed".to_string()),
-                require_user_presence: false,
-                max_uses: 1,
-                max_ttl_seconds: 60,
-            },
-        }],
+    let policy_path = secretctl_dir.join("policy.yaml");
+    let policy = if policy_path.exists() {
+        let content = tokio::fs::read_to_string(&policy_path).await?;
+        PolicyDocument::from_yaml(&content)?
+    } else {
+        // A missing policy is intentionally default-deny.
+        PolicyDocument {
+            version: "1.0".to_string(),
+            rules: vec![],
+        }
     };
-    let evaluator = PolicyEvaluator::new(default_policy);
+    let evaluator = PolicyEvaluator::new(policy);
 
-    let state = BrokerState::new(broker_key, "broker-key-default", store, provider, evaluator);
+    let signing_key_id = store
+        .active_signing_key_id()?
+        .unwrap_or_else(|| "broker-key-v1".to_string());
+    if store.active_signing_key_id()?.is_none() {
+        store.register_signing_key(&signing_key_id, &broker_key.public_key_bytes(), "active")?;
+    }
+    let (audit_key_version, audit_key_locator) = store
+        .active_audit_key_version()?
+        .unwrap_or_else(|| (1, "audit-chain-key-v1".to_string()));
+    let audit_key = if provider.exists(&audit_key_locator).await? {
+        provider.get_secret(&audit_key_locator).await?
+    } else {
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        provider.store_secret(&audit_key_locator, &bytes).await?;
+        let key = secretctl_crypto::SecretBytes::new(bytes.to_vec());
+        bytes.fill(0);
+        key
+    };
+    if store.active_audit_key_version()?.is_none() {
+        store.register_audit_key_version(audit_key_version, &audit_key_locator, "active")?;
+    }
+    let state = BrokerState::new_with_audit_key(
+        broker_key,
+        signing_key_id,
+        audit_key,
+        audit_key_version,
+        store,
+        provider,
+        evaluator,
+    );
 
-    // Register default GitHub login and TOTP recipe
-    let github_origin = secretctl_domain::CanonicalOrigin::parse("https://github.com:443").unwrap();
-    state.register_recipe(secretctl_domain::SiteRecipe {
-        recipe_id: secretctl_domain::RecipeId::parse("rcp_github_totp").unwrap(),
-        version: 1,
-        name: "GitHub TOTP".to_string(),
-        action: secretctl_domain::ActionKind::AuthenticateTotp,
-        top_origin: github_origin.clone(),
-        path_prefix: None,
-        frame_origin: Some(github_origin.clone()),
-        fields: vec![secretctl_domain::RecipeField {
-            role: "totp_code".to_string(),
-            selector: "input[autocomplete='one-time-code'], input[name='otp'], input[type='tel']"
-                .to_string(),
-            optional: false,
-            clear_first: true,
-        }],
-        submit: Some(secretctl_domain::RecipeSubmit {
-            selector: Some("button[type='submit']".to_string()),
-            auto_submit: true,
-            delay_ms: None,
-        }),
-        success_indicators: None,
-        content_hash: vec![],
-        enabled: true,
-    });
-    state.register_recipe(secretctl_domain::SiteRecipe {
-        recipe_id: secretctl_domain::RecipeId::parse("rcp_github_password").unwrap(),
-        version: 1,
-        name: "GitHub Password".to_string(),
-        action: secretctl_domain::ActionKind::AuthenticatePassword,
-        top_origin: github_origin.clone(),
-        path_prefix: None,
-        frame_origin: Some(github_origin),
-        fields: vec![secretctl_domain::RecipeField {
-            role: "password".to_string(),
-            selector: "input[type='password']".to_string(),
-            optional: false,
-            clear_first: true,
-        }],
-        submit: Some(secretctl_domain::RecipeSubmit {
-            selector: Some("button[type='submit']".to_string()),
-            auto_submit: true,
-            delay_ms: None,
-        }),
-        success_indicators: None,
-        content_hash: vec![],
-        enabled: true,
-    });
+    let recipes_dir = secretctl_dir.join("recipes");
+    if recipes_dir.exists() {
+        let mut entries = tokio::fs::read_dir(&recipes_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let content = tokio::fs::read_to_string(&path).await?;
+            let mut recipe: secretctl_domain::SiteRecipe = serde_json::from_str(&content)?;
+            anyhow::ensure!(
+                (1..=5).contains(&recipe.fields.len()),
+                "recipe {} must declare between 1 and 5 fields",
+                path.display()
+            );
+            anyhow::ensure!(
+                recipe.fields.iter().all(|field| {
+                    !field.role.is_empty()
+                        && field.role.len() <= 64
+                        && !field.selector.trim().is_empty()
+                }),
+                "recipe {} contains an invalid field role or selector",
+                path.display()
+            );
+            anyhow::ensure!(
+                recipe
+                    .match_rule
+                    .path_prefix
+                    .as_ref()
+                    .is_none_or(|prefix| prefix.starts_with('/')),
+                "recipe {} path_prefix must begin with '/'",
+                path.display()
+            );
+            recipe.content_hash = secretctl_crypto::sha256_digest(content.as_bytes()).to_vec();
+            state.register_recipe(recipe);
+        }
+    }
 
     let runtime_dir = secretctl_dir.join("run");
-    let server = BrokerServer::new(state, runtime_dir.clone());
+    let server = BrokerServer::new(state.clone(), runtime_dir.clone());
 
     server.start().await?;
 
@@ -155,6 +142,9 @@ async fn main() -> anyhow::Result<()> {
     println!("Press Ctrl+C to stop.\n");
 
     tokio::signal::ctrl_c().await?;
+    state
+        .write_audit_checkpoint()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
     println!("secretctld shutting down.");
     Ok(())
 }

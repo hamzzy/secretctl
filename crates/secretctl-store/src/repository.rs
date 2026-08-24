@@ -2,7 +2,9 @@ use crate::error::StoreError;
 use crate::migrations::apply_migrations;
 use rusqlite::{Connection, params};
 use secretctl_domain::{
-    ActionKind, AgentPrincipal, Approval, AuditEvent, CredentialDescriptor, CredentialId, EventId,
+    ActionKind, AgentId, AgentPrincipal, Approval, AuditCheckpoint, AuditEvent, Capability,
+    CapabilityId, CapabilitySummary, CredentialDescriptor, CredentialId, EventId, Execution,
+    RequestId,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -37,18 +39,78 @@ impl SqliteStore {
     pub fn insert_agent(&self, agent: &AgentPrincipal) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO agents (agent_id, public_key, executable_hash, display_name, state, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO agents
+             (agent_id, role, public_key, executable_hash, executable_path, peer_uid,
+              display_name, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 agent.agent_id.as_str(),
+                agent.role,
                 agent.public_key,
                 agent.executable_hash,
+                agent.executable_path,
+                agent.peer_uid,
                 agent.display_name,
                 agent.state,
                 agent.created_at.to_rfc3339()
             ],
         )?;
         Ok(())
+    }
+
+    pub fn get_enrolled_agent(&self, agent_id: &str) -> Result<AgentPrincipal, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT agent_id, role, public_key, display_name, peer_uid, executable_path,
+                    executable_hash, state, created_at
+             FROM agents WHERE agent_id = ?1 AND state = 'enrolled'",
+            [agent_id],
+            |row| {
+                let id: String = row.get(0)?;
+                let created_at: String = row.get(8)?;
+                Ok(AgentPrincipal {
+                    agent_id: AgentId::parse(&id).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    role: row.get(1)?,
+                    public_key: row.get(2)?,
+                    display_name: row.get(3)?,
+                    peer_uid: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
+                    executable_path: row.get(5)?,
+                    executable_hash: row.get(6)?,
+                    state: row.get(7)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                        .map(|value| value.with_timezone(&chrono::Utc))
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                8,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                })
+            },
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => StoreError::NotFound(agent_id.to_string()),
+            other => StoreError::Sqlite(other),
+        })
+    }
+
+    pub fn list_agents(&self) -> Result<Vec<AgentPrincipal>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn
+            .prepare("SELECT agent_id FROM agents WHERE state = 'enrolled' ORDER BY created_at")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(conn);
+        ids.iter().map(|id| self.get_enrolled_agent(id)).collect()
     }
 
     pub fn agent_exists(&self, agent_id: &str) -> Result<bool, StoreError> {
@@ -80,15 +142,24 @@ impl SqliteStore {
 
     pub fn insert_audit_event(&self, event: &AuditEvent) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::insert_audit_event_tx(&conn, event)?;
+        Ok(())
+    }
+
+    fn insert_audit_event_tx(conn: &Connection, event: &AuditEvent) -> Result<(), rusqlite::Error> {
         conn.execute(
-            "INSERT INTO audit_events (event_id, event_type, actor_type, actor_id, event_json, previous_hash, event_hash, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO audit_events
+             (sequence, event_id, event_type, actor_type, actor_id, event_json,
+              audit_key_version, previous_hash, event_hash, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
+                event.sequence as i64,
                 event.event_id.as_str(),
                 event.event_type,
                 event.actor_type,
                 event.actor_id,
                 event.event_json,
+                event.audit_key_version,
                 event.previous_hash,
                 event.event_hash,
                 event.created_at.to_rfc3339()
@@ -139,6 +210,33 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn insert_approval_with_audit(
+        &self,
+        approval: &Approval,
+        audit_event: &AuditEvent,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO approvals
+             (approval_id, request_id, decision, actor, presence, context_digest, decided_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                approval.approval_id.as_str(),
+                approval.request_id.as_str(),
+                approval.decision,
+                approval.actor,
+                approval.presence,
+                approval.context_digest,
+                approval.decided_at.map(|value| value.to_rfc3339()),
+                approval.expires_at.to_rfc3339(),
+            ],
+        )?;
+        Self::insert_audit_event_tx(&tx, audit_event)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn update_approval(&self, approval: &Approval) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
@@ -156,6 +254,33 @@ impl SqliteStore {
         if changed != 1 {
             return Err(StoreError::NotFound(approval.approval_id.to_string()));
         }
+        Ok(())
+    }
+
+    pub fn update_approval_with_audit(
+        &self,
+        approval: &Approval,
+        audit_event: &AuditEvent,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE approvals
+             SET decision = ?2, actor = ?3, presence = ?4, decided_at = ?5
+             WHERE approval_id = ?1 AND decision = 'pending'",
+            params![
+                approval.approval_id.as_str(),
+                approval.decision,
+                approval.actor,
+                approval.presence,
+                approval.decided_at.map(|value| value.to_rfc3339()),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::StateConflict(approval.approval_id.to_string()));
+        }
+        Self::insert_audit_event_tx(&tx, audit_event)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -224,16 +349,281 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn list_credentials(&self) -> Result<Vec<CredentialDescriptor>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare("SELECT name FROM credentials ORDER BY name")?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(conn);
+        names
+            .iter()
+            .map(|name| self.get_credential_by_name(name))
+            .collect()
+    }
+
+    pub fn insert_capability_with_audit(
+        &self,
+        capability: &Capability,
+        signing_key_id: &str,
+        audit_event: &AuditEvent,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO capabilities
+             (capability_id, request_id, token_hash, state, max_uses, used_count,
+              issued_at, expires_at, revoked_reason, signing_key_id, policy_hash,
+              browser_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                capability.capability_id.as_str(),
+                capability.request_id.as_str(),
+                capability.token_hash,
+                capability.state.as_str(),
+                capability.max_uses,
+                capability.used_count,
+                capability.issued_at.to_rfc3339(),
+                capability.expires_at.to_rfc3339(),
+                capability.revoked_reason,
+                signing_key_id,
+                capability.policy_hash,
+                capability.browser_session_id.as_str(),
+            ],
+        )?;
+        Self::insert_audit_event_tx(&tx, audit_event)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn consume_capability_with_execution_and_audit(
+        &self,
+        capability_id: &CapabilityId,
+        execution: &Execution,
+        audit_event: &AuditEvent,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE capabilities
+             SET state = 'consumed', used_count = used_count + 1
+             WHERE capability_id = ?1
+               AND state IN ('issued', 'active')
+               AND used_count < max_uses",
+            [capability_id.as_str()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::StateConflict(capability_id.to_string()));
+        }
+        tx.execute(
+            "INSERT INTO executions
+             (execution_id, capability_id, state, prepared_context_digest,
+              started_at, completed_at, result_code)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                execution.execution_id.as_str(),
+                execution.capability_id.as_str(),
+                execution.state.as_str(),
+                execution.prepared_context_digest,
+                execution.started_at.map(|value| value.to_rfc3339()),
+                execution.completed_at.map(|value| value.to_rfc3339()),
+                execution.result_code,
+            ],
+        )?;
+        Self::insert_audit_event_tx(&tx, audit_event)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn finish_execution_with_audit(
+        &self,
+        execution: &Execution,
+        audit_event: &AuditEvent,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE executions
+             SET state = ?2, completed_at = ?3, result_code = ?4
+             WHERE execution_id = ?1 AND state = 'consuming'",
+            params![
+                execution.execution_id.as_str(),
+                execution.state.as_str(),
+                execution.completed_at.map(|value| value.to_rfc3339()),
+                execution.result_code,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::StateConflict(
+                execution.execution_id.to_string(),
+            ));
+        }
+        Self::insert_audit_event_tx(&tx, audit_event)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn recover_incomplete_state(&self) -> Result<(usize, usize), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let expired = tx.execute(
+            "UPDATE capabilities SET state = 'expired', revoked_reason = 'broker_restart'
+             WHERE state IN ('issued', 'active')",
+            [],
+        )?;
+        let indeterminate = tx.execute(
+            "UPDATE executions SET state = 'indeterminate', completed_at = ?1,
+             result_code = 'BROKER_RESTART'
+             WHERE state IN ('prepared', 'consuming')",
+            [chrono::Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok((expired, indeterminate))
+    }
+
+    pub fn revoke_capability(
+        &self,
+        capability_id: &CapabilityId,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE capabilities SET state = 'revoked', revoked_reason = ?2
+             WHERE capability_id = ?1 AND state IN ('issued', 'active')",
+            params![capability_id.as_str(), reason],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::StateConflict(capability_id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn revoke_capability_with_audit(
+        &self,
+        capability_id: &CapabilityId,
+        reason: &str,
+        audit_event: &AuditEvent,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE capabilities SET state = 'revoked', revoked_reason = ?2
+             WHERE capability_id = ?1 AND state IN ('issued', 'active')",
+            params![capability_id.as_str(), reason],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::StateConflict(capability_id.to_string()));
+        }
+        Self::insert_audit_event_tx(&tx, audit_event)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn revoke_capabilities_not_policy_with_audit(
+        &self,
+        active_policy_hash: &[u8],
+        audit_event: &AuditEvent,
+    ) -> Result<usize, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE capabilities SET state = 'revoked', revoked_reason = 'policy_changed'
+             WHERE state IN ('issued', 'active') AND policy_hash != ?1",
+            [active_policy_hash],
+        )?;
+        Self::insert_audit_event_tx(&tx, audit_event)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn revoke_capabilities_for_session(
+        &self,
+        browser_session_id: &str,
+    ) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE capabilities SET state = 'revoked', revoked_reason = 'session_stale'
+             WHERE state IN ('issued', 'active') AND browser_session_id = ?1",
+            [browser_session_id],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn list_capabilities(
+        &self,
+        state: Option<&str>,
+    ) -> Result<Vec<CapabilitySummary>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if state.is_some() {
+            "SELECT capability_id, request_id, state, max_uses, used_count, issued_at,
+                    expires_at, revoked_reason, signing_key_id
+             FROM capabilities WHERE state = ?1 ORDER BY issued_at DESC"
+        } else {
+            "SELECT capability_id, request_id, state, max_uses, used_count, issued_at,
+                    expires_at, revoked_reason, signing_key_id
+             FROM capabilities ORDER BY issued_at DESC"
+        };
+        let mut statement = conn.prepare(sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| -> Result<CapabilitySummary, rusqlite::Error> {
+            let capability_id: String = row.get(0)?;
+            let request_id: String = row.get(1)?;
+            let issued_at: String = row.get(5)?;
+            let expires_at: String = row.get(6)?;
+            let parse_time = |index, value: String| {
+                chrono::DateTime::parse_from_rfc3339(&value)
+                    .map(|time| time.with_timezone(&chrono::Utc))
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            index,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+            };
+            Ok(CapabilitySummary {
+                capability_id: CapabilityId::parse(&capability_id).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                request_id: RequestId::parse(&request_id).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                state: row.get(2)?,
+                max_uses: row.get(3)?,
+                used_count: row.get(4)?,
+                issued_at: parse_time(5, issued_at)?,
+                expires_at: parse_time(6, expires_at)?,
+                revoked_reason: row.get(7)?,
+                signing_key_id: row.get(8)?,
+            })
+        };
+        let rows = if let Some(state) = state {
+            statement.query_map([state], map_row)?
+        } else {
+            statement.query_map([], map_row)?
+        };
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut statement = conn.prepare(
             "SELECT sequence, event_id, event_type, actor_type, actor_id, event_json,
-                    previous_hash, event_hash, created_at
+                    audit_key_version, previous_hash, event_hash, created_at
              FROM audit_events ORDER BY sequence",
         )?;
         let rows = statement.query_map([], |row| {
             let event_id: String = row.get(1)?;
-            let created_at: String = row.get(8)?;
+            let created_at: String = row.get(9)?;
             Ok(AuditEvent {
                 sequence: row.get::<_, i64>(0)? as u64,
                 event_id: EventId::parse(&event_id).map_err(|e| {
@@ -247,13 +637,14 @@ impl SqliteStore {
                 actor_type: row.get(3)?,
                 actor_id: row.get(4)?,
                 event_json: row.get(5)?,
-                previous_hash: row.get(6)?,
-                event_hash: row.get(7)?,
+                audit_key_version: row.get::<_, i64>(6)? as u32,
+                previous_hash: row.get(7)?,
+                event_hash: row.get(8)?,
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
                     .map(|parsed| parsed.with_timezone(&chrono::Utc))
                     .map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            8,
+                            9,
                             rusqlite::types::Type::Text,
                             Box::new(e),
                         )
@@ -285,6 +676,175 @@ impl SqliteStore {
         )?;
         Ok(sequence as u64)
     }
+
+    pub fn insert_audit_checkpoint(&self, checkpoint: &AuditCheckpoint) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO audit_checkpoints
+             (sequence, event_hash, audit_key_version, signing_key_id, signature, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                checkpoint.sequence as i64,
+                checkpoint.event_hash,
+                checkpoint.audit_key_version,
+                checkpoint.signing_key_id,
+                checkpoint.signature,
+                checkpoint.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_audit_checkpoints(&self) -> Result<Vec<AuditCheckpoint>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT sequence, event_hash, audit_key_version, signing_key_id, signature, created_at
+             FROM audit_checkpoints ORDER BY sequence",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let created_at: String = row.get(5)?;
+            Ok(AuditCheckpoint {
+                sequence: row.get::<_, i64>(0)? as u64,
+                event_hash: row.get(1)?,
+                audit_key_version: row.get::<_, i64>(2)? as u32,
+                signing_key_id: row.get(3)?,
+                signature: row.get(4)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|value| value.with_timezone(&chrono::Utc))
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn register_signing_key(
+        &self,
+        key_id: &str,
+        public_key: &[u8],
+        state: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO trusted_signing_keys
+             (key_id, public_key, state, created_at, retired_at)
+             VALUES (?1, ?2, ?3, ?4, NULL)
+             ON CONFLICT(key_id) DO UPDATE SET public_key = excluded.public_key, state = excluded.state",
+            params![key_id, public_key, state, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn retire_signing_key(&self, key_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE trusted_signing_keys SET state = 'retired', retired_at = ?2
+             WHERE key_id = ?1 AND state = 'active'",
+            params![key_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotFound(key_id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn trusted_signing_keys(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<u8>>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT key_id, public_key FROM trusted_signing_keys
+             WHERE state IN ('active', 'retired')",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        rows.collect::<Result<std::collections::HashMap<_, _>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_signing_key_id(&self) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT key_id FROM trusted_signing_keys WHERE state = 'active'
+                 ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok())
+    }
+
+    pub fn register_audit_key_version(
+        &self,
+        version: u32,
+        key_locator: &str,
+        state: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO audit_key_versions (version, key_locator, state, created_at, retired_at)
+             VALUES (?1, ?2, ?3, ?4, NULL)
+             ON CONFLICT(version) DO UPDATE SET key_locator = excluded.key_locator, state = excluded.state",
+            params![version, key_locator, state, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn audit_key_versions(&self) -> Result<Vec<(u32, String, String)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT version, key_locator, state FROM audit_key_versions ORDER BY version",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u32,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn retire_audit_key_version(&self, version: u32) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE audit_key_versions SET state = 'retired', retired_at = ?2
+             WHERE version = ?1 AND state = 'active'",
+            params![version, chrono::Utc::now().to_rfc3339()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotFound(version.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn active_audit_key_version(&self) -> Result<Option<(u32, String)>, StoreError> {
+        Ok(self
+            .audit_key_versions()?
+            .into_iter()
+            .filter(|(_, _, state)| state == "active")
+            .max_by_key(|(version, _, _)| *version)
+            .map(|(version, locator, _)| (version, locator)))
+    }
+
+    #[doc(hidden)]
+    pub fn install_audit_failure_trigger_for_tests(&self) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER secretctl_test_fail_audit
+             BEFORE INSERT ON audit_events
+             BEGIN SELECT RAISE(ABORT, 'simulated audit storage failure'); END;",
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -300,8 +860,11 @@ mod tests {
 
         let agent = AgentPrincipal {
             agent_id: AgentId::new(),
+            role: "agent".to_string(),
             public_key: vec![1, 2, 3, 4],
             display_name: "test-agent".to_string(),
+            peer_uid: Some(501),
+            executable_path: None,
             executable_hash: None,
             state: "enrolled".to_string(),
             created_at: Utc::now(),
@@ -324,6 +887,8 @@ mod tests {
         let audit_event = create_audit_event(
             1,
             &GENESIS_PREVIOUS_HASH,
+            1,
+            &[9u8; 32],
             "agent.enrolled",
             "agent",
             Some(agent.agent_id.to_string()),

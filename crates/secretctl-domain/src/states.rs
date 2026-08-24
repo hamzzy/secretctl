@@ -116,13 +116,14 @@ impl CapabilityState {
             });
         }
 
-        let valid = match (self, next) {
-            (Self::Issued, Self::Active) => true,
-            (Self::Issued, Self::Consumed) => true,
-            (Self::Active, Self::Consumed) => true,
-            (_, Self::Expired) | (_, Self::Revoked) => true,
-            _ => false,
-        };
+        let valid = matches!(
+            (self, next),
+            (Self::Issued, Self::Active)
+                | (Self::Issued, Self::Consumed)
+                | (Self::Active, Self::Consumed)
+                | (_, Self::Expired)
+                | (_, Self::Revoked)
+        );
 
         if valid {
             Ok(next)
@@ -170,13 +171,13 @@ impl BrowserSessionState {
             });
         }
 
-        let valid = match (self, next) {
-            (Self::Starting, Self::Active) => true,
-            (Self::Active, Self::Stale) => true,
-            (Self::Stale, Self::Active) => true,
-            (_, Self::Terminated) => true,
-            _ => false,
-        };
+        let valid = matches!(
+            (self, next),
+            (Self::Starting, Self::Active)
+                | (Self::Active, Self::Stale)
+                | (Self::Stale, Self::Active)
+                | (_, Self::Terminated)
+        );
 
         if valid {
             Ok(next)
@@ -221,14 +222,14 @@ impl ExecutionState {
             });
         }
 
-        let valid = match (self, next) {
-            (Self::Prepared, Self::Consuming) => true,
-            (Self::Consuming, Self::Completed) => true,
-            (Self::Consuming, Self::Failed) => true,
-            (Self::Consuming, Self::Indeterminate) => true,
-            (Self::Prepared, Self::Failed) => true,
-            _ => false,
-        };
+        let valid = matches!(
+            (self, next),
+            (Self::Prepared, Self::Consuming)
+                | (Self::Consuming, Self::Completed)
+                | (Self::Consuming, Self::Failed)
+                | (Self::Consuming, Self::Indeterminate)
+                | (Self::Prepared, Self::Failed)
+        );
 
         if valid {
             Ok(next)

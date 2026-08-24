@@ -21,11 +21,12 @@
         "navigation_epoch": { "type": "integer" },
         "top_origin": { "type": "string" },
         "frame_origin": { "type": "string" },
+        "path": { "type": "string", "pattern": "^/" },
         "path_sha256": { "type": "string" },
         "tls": { "type": "boolean" },
         "incognito": { "type": "boolean" }
       },
-      "required": ["browser_session_id", "tab_id", "frame_id", "document_id", "navigation_epoch", "top_origin", "frame_origin", "path_sha256", "tls"],
+      "required": ["browser_session_id", "tab_id", "frame_id", "document_id", "navigation_epoch", "top_origin", "frame_origin", "path", "path_sha256", "tls"],
       "additionalProperties": false
     },
     "ExecutorPrepare": {

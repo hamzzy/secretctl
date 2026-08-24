@@ -2,7 +2,8 @@ use chrono::Utc;
 use secretctl_crypto::KeyPair;
 use secretctl_domain::{
     ActionKind, AgentId, BrowserSession, BrowserSessionId, BrowserSessionState, CanonicalOrigin,
-    CredentialDescriptor, CredentialId, PageContext, RecipeField, RecipeId, RequestId, SiteRecipe,
+    CredentialDescriptor, CredentialId, PageContext, RecipeField, RecipeId, RecipeMatch, RequestId,
+    SiteRecipe,
 };
 use secretctl_policy::{
     DestinationRule, PolicyDocument, PolicyEvaluator, PolicyRule, RuleConditions,
@@ -99,9 +100,11 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         version: 1,
         name: "GitHub Login".to_string(),
         action: ActionKind::AuthenticatePassword,
-        top_origin: origin.clone(),
-        path_prefix: Some("/login".to_string()),
-        frame_origin: Some(origin.clone()),
+        match_rule: RecipeMatch {
+            top_origin: origin.clone(),
+            path_prefix: Some("/login".to_string()),
+            frame_origin: Some(origin.clone()),
+        },
         fields: vec![RecipeField {
             role: "password".to_string(),
             selector: "input[type=password]".to_string(),
@@ -119,9 +122,11 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         version: 1,
         name: "GitHub TOTP".to_string(),
         action: ActionKind::AuthenticateTotp,
-        top_origin: origin.clone(),
-        path_prefix: None,
-        frame_origin: Some(origin.clone()),
+        match_rule: RecipeMatch {
+            top_origin: origin.clone(),
+            path_prefix: None,
+            frame_origin: Some(origin.clone()),
+        },
         fields: vec![RecipeField {
             role: "totp_code".to_string(),
             selector: "input[name='otp']".to_string(),
@@ -138,9 +143,11 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         version: 1,
         name: "Account recovery".to_string(),
         action: ActionKind::FormSensitiveFill,
-        top_origin: origin.clone(),
-        path_prefix: None,
-        frame_origin: Some(origin.clone()),
+        match_rule: RecipeMatch {
+            top_origin: origin.clone(),
+            path_prefix: None,
+            frame_origin: Some(origin.clone()),
+        },
         fields: vec![RecipeField {
             role: "recovery_code".to_string(),
             selector: "input[name='recovery_code']".to_string(),
@@ -173,6 +180,7 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
             frame_origin: origin.clone(),
             navigation_epoch: 1,
             document_id: "doc-1".to_string(),
+            path: "/login".to_string(),
             path_sha256: "path-hash".to_string(),
             tls: true,
             incognito: false,
@@ -230,6 +238,7 @@ async fn test_full_fake_executor_flow_success() {
         navigation_epoch: 1,
         top_origin: origin.clone(),
         frame_origin: origin.clone(),
+        path: "/login".to_string(),
         path_sha256: "path-hash".to_string(),
         tls: true,
         incognito: false,
@@ -286,6 +295,55 @@ async fn test_full_fake_executor_flow_success() {
 }
 
 #[tokio::test]
+async fn test_agent_path_constraint_cannot_override_measured_page_path() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker.register_page_context(
+        PageContext {
+            tab_id: 1,
+            frame_id: 0,
+            top_origin: origin.clone(),
+            frame_origin: origin.clone(),
+            navigation_epoch: 2,
+            document_id: "doc-2".to_string(),
+            path: "/settings/security".to_string(),
+            path_sha256: "different-path-hash".to_string(),
+            tls: true,
+            incognito: false,
+            observed_at: Utc::now(),
+        },
+        session_id.clone(),
+    );
+
+    let result = broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin,
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id,
+                tab_hint: Some(1),
+                reason: "Attempt to override measured path".to_string(),
+                wait: true,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await;
+
+    let error = result.expect_err("measured path mismatch must fail closed");
+    assert_eq!(
+        error.code,
+        secretctl_protocol::RpcErrorCode::ORIGIN_MISMATCH.0
+    );
+    assert!(broker.capabilities.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_concurrent_consume_race_condition() {
     let (broker, session_id, origin) = setup_test_broker().await;
     let agent_id = AgentId::new();
@@ -326,6 +384,7 @@ async fn test_concurrent_consume_race_condition() {
         navigation_epoch: 1,
         top_origin: origin.clone(),
         frame_origin: origin.clone(),
+        path: "/login".to_string(),
         path_sha256: "path-hash".to_string(),
         tls: true,
         incognito: false,
@@ -409,6 +468,7 @@ async fn test_epoch_invalidation_fails_closed() {
         navigation_epoch: 2, // Mismatch!
         top_origin: origin.clone(),
         frame_origin: origin.clone(),
+        path: "/login".to_string(),
         path_sha256: "path-hash".to_string(),
         tls: true,
         incognito: false,
@@ -476,6 +536,7 @@ async fn test_totp_execution_flow() {
         navigation_epoch: 1,
         top_origin: origin.clone(),
         frame_origin: origin.clone(),
+        path: "/login".to_string(),
         path_sha256: "path-hash".to_string(),
         tls: true,
         incognito: false,
@@ -548,6 +609,7 @@ async fn test_sensitive_form_fill_flow() {
         navigation_epoch: 1,
         top_origin: origin.clone(),
         frame_origin: origin.clone(),
+        path: "/login".to_string(),
         path_sha256: "path-hash".to_string(),
         tls: true,
         incognito: false,

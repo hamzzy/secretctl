@@ -3,7 +3,7 @@ use secretctl_audit::{AuditContext, create_audit_event};
 use secretctl_capability::{
     CapabilityClaims, ExecutionContextSnapshot, mint_capability, verify_and_consume_capability,
 };
-use secretctl_crypto::KeyPair;
+use secretctl_crypto::{KeyPair, SecretBytes};
 use secretctl_domain::{
     ActionKind, ActionRequestState, AgentId, Approval, ApprovalId, BrowserSession,
     BrowserSessionId, BrowserSessionState, Capability, CapabilityId, CredentialDescriptor,
@@ -20,7 +20,6 @@ use secretctl_protocol::{
 use secretctl_providers::SecretProvider;
 use secretctl_store::SqliteStore;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 pub struct ActiveBrowserSession {
@@ -58,9 +57,15 @@ pub struct AuthorizationContext {
     pub decision: PolicyDecision,
 }
 
+#[derive(Clone)]
 pub struct PendingApprovalEntry {
     pub approval: Approval,
     pub authorization: AuthorizationContext,
+}
+
+struct AuditCursor {
+    next_sequence: u64,
+    latest_hash: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -79,8 +84,9 @@ pub struct BrokerState {
     pub request_fingerprints: Arc<Mutex<HashMap<RequestId, [u8; 32]>>>,
     pub approvals: Arc<Mutex<HashMap<ApprovalId, PendingApprovalEntry>>>,
     pub recipes: Arc<RwLock<HashMap<RecipeId, SiteRecipe>>>,
-    audit_sequence: Arc<AtomicU64>,
-    latest_audit_hash: Arc<Mutex<Vec<u8>>>,
+    audit_key_version: u32,
+    audit_key: Arc<SecretBytes>,
+    audit_cursor: Arc<Mutex<AuditCursor>>,
 }
 
 impl BrokerState {
@@ -91,10 +97,34 @@ impl BrokerState {
         provider: Arc<dyn SecretProvider>,
         policy_evaluator: PolicyEvaluator,
     ) -> Self {
+        let fallback_audit_key =
+            SecretBytes::new(secretctl_crypto::sha256_digest(&broker_key.to_bytes()).to_vec());
+        Self::new_with_audit_key(
+            broker_key,
+            key_id,
+            fallback_audit_key,
+            1,
+            store,
+            provider,
+            policy_evaluator,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_audit_key(
+        broker_key: KeyPair,
+        key_id: impl Into<String>,
+        audit_key: SecretBytes,
+        audit_key_version: u32,
+        store: SqliteStore,
+        provider: Arc<dyn SecretProvider>,
+        policy_evaluator: PolicyEvaluator,
+    ) -> Self {
         let initial_hash = store
             .get_latest_audit_hash()
             .unwrap_or_else(|_| secretctl_audit::GENESIS_PREVIOUS_HASH.to_vec());
         let initial_sequence = store.get_latest_audit_sequence().unwrap_or(0) + 1;
+        let _ = store.recover_incomplete_state();
 
         Self {
             broker_key: Arc::new(broker_key),
@@ -111,8 +141,12 @@ impl BrokerState {
             request_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             approvals: Arc::new(Mutex::new(HashMap::new())),
             recipes: Arc::new(RwLock::new(HashMap::new())),
-            audit_sequence: Arc::new(AtomicU64::new(initial_sequence)),
-            latest_audit_hash: Arc::new(Mutex::new(initial_hash)),
+            audit_key_version,
+            audit_key: Arc::new(audit_key),
+            audit_cursor: Arc::new(Mutex::new(AuditCursor {
+                next_sequence: initial_sequence,
+                latest_hash: initial_hash,
+            })),
         }
     }
 
@@ -123,12 +157,13 @@ impl BrokerState {
         actor_id: Option<String>,
         context: &AuditContext,
     ) -> Result<(), RpcError> {
-        let seq = self.audit_sequence.fetch_add(1, Ordering::SeqCst);
-        let mut prev_hash_lock = self.latest_audit_hash.lock().unwrap();
+        let mut cursor = self.audit_cursor.lock().unwrap();
 
         let event = create_audit_event(
-            seq,
-            &prev_hash_lock,
+            cursor.next_sequence,
+            &cursor.latest_hash,
+            self.audit_key_version,
+            self.audit_key.as_bytes(),
             event_type,
             actor_type,
             actor_id,
@@ -141,8 +176,40 @@ impl BrokerState {
             .insert_audit_event(&event)
             .map_err(|e| RpcError::new(RpcErrorCode::INTERNAL_ERROR, e.to_string()))?;
 
-        *prev_hash_lock = event.event_hash.clone();
+        cursor.next_sequence += 1;
+        cursor.latest_hash = event.event_hash;
         Ok(())
+    }
+
+    pub fn write_audit_checkpoint(&self) -> Result<(), RpcError> {
+        self.record_audit_event(
+            "audit.checkpoint",
+            "broker",
+            None,
+            &AuditContext {
+                request_id: None,
+                credential_id: None,
+                capability_id: None,
+                browser_session_id: None,
+                target_origin: None,
+                action: None,
+                decision: Some("shutdown".to_string()),
+                risk_level: None,
+                error_code: None,
+            },
+        )?;
+        let cursor = self.audit_cursor.lock().unwrap();
+        let checkpoint = secretctl_audit::create_audit_checkpoint(
+            cursor.next_sequence - 1,
+            cursor.latest_hash.clone(),
+            self.audit_key_version,
+            self.key_id.clone(),
+            &self.broker_key,
+            Utc::now(),
+        );
+        self.store
+            .insert_audit_checkpoint(&checkpoint)
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Checkpoint unavailable"))
     }
 
     pub fn register_recipe(&self, recipe: SiteRecipe) {
@@ -224,6 +291,43 @@ impl BrokerState {
             &self.broker_key.public_key_bytes(),
         )
         .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Capability mint failed"))?;
+        let audit_context = AuditContext {
+            request_id: Some(authorization.request_id.to_string()),
+            credential_id: Some(authorization.credential.credential_id.to_string()),
+            capability_id: Some(capability.capability_id.to_string()),
+            browser_session_id: Some(authorization.browser_session_id.to_string()),
+            target_origin: Some(capability.top_origin.to_string()),
+            action: Some(authorization.action.to_string()),
+            decision: Some(if approval_id.is_some() {
+                "user_approved".to_string()
+            } else {
+                "auto_approved".to_string()
+            }),
+            risk_level: Some(format!("{:?}", authorization.decision.risk_level).to_lowercase()),
+            error_code: None,
+        };
+        {
+            let mut cursor = self.audit_cursor.lock().unwrap();
+            let audit_event = create_audit_event(
+                cursor.next_sequence,
+                &cursor.latest_hash,
+                self.audit_key_version,
+                self.audit_key.as_bytes(),
+                "capability.minted",
+                "broker",
+                None,
+                &audit_context,
+                Utc::now(),
+            )
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+            self.store
+                .insert_capability_with_audit(&capability, &self.key_id, &audit_event)
+                .map_err(|_| {
+                    RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Durable state unavailable")
+                })?;
+            cursor.next_sequence += 1;
+            cursor.latest_hash = audit_event.event_hash;
+        }
         self.capabilities.lock().unwrap().insert(
             capability.capability_id.clone(),
             CapabilityEntry {
@@ -234,26 +338,6 @@ impl BrokerState {
                 provider_locator: authorization.credential.provider_locator,
             },
         );
-        self.record_audit_event(
-            "capability.minted",
-            "broker",
-            None,
-            &AuditContext {
-                request_id: Some(authorization.request_id.to_string()),
-                credential_id: Some(authorization.credential.credential_id.to_string()),
-                capability_id: Some(capability.capability_id.to_string()),
-                browser_session_id: Some(authorization.browser_session_id.to_string()),
-                target_origin: Some(capability.top_origin.to_string()),
-                action: Some(authorization.action.to_string()),
-                decision: Some(if approval_id.is_some() {
-                    "user_approved".to_string()
-                } else {
-                    "auto_approved".to_string()
-                }),
-                risk_level: Some(format!("{:?}", authorization.decision.risk_level).to_lowercase()),
-                error_code: None,
-            },
-        )?;
         let response = ActionResponseResult {
             request_id: authorization.request_id,
             state: ActionRequestState::CapabilityIssued,
@@ -460,6 +544,17 @@ impl BrokerState {
                     "Requested origin does not match verified browser origin",
                 ));
             }
+            if params
+                .target
+                .path_prefix
+                .as_ref()
+                .is_some_and(|prefix| !context.path.starts_with(prefix))
+            {
+                return Err(RpcError::new(
+                    RpcErrorCode::ORIGIN_MISMATCH,
+                    "Requested path constraint does not match verified browser path",
+                ));
+            }
             context.clone()
         };
 
@@ -472,7 +567,7 @@ impl BrokerState {
                     &params.identity,
                     params.action,
                     target_origin,
-                    params.target.path_prefix.as_deref(),
+                    Some(&measured_context.path),
                     &assurance,
                 )
                 .map_err(|e| {
@@ -511,11 +606,20 @@ impl BrokerState {
                 .find(|recipe| {
                     recipe.enabled
                         && recipe.action == params.action
-                        && recipe.top_origin.matches(&measured_context.top_origin)
                         && recipe
+                            .match_rule
+                            .top_origin
+                            .matches(&measured_context.top_origin)
+                        && recipe
+                            .match_rule
                             .frame_origin
                             .as_ref()
                             .is_none_or(|origin| origin.matches(&measured_context.frame_origin))
+                        && recipe
+                            .match_rule
+                            .path_prefix
+                            .as_ref()
+                            .is_none_or(|prefix| measured_context.path.starts_with(prefix))
                 })
                 .cloned()
                 .ok_or_else(|| {
@@ -552,9 +656,39 @@ impl BrokerState {
                 decided_at: None,
                 expires_at: now + chrono::Duration::seconds(60),
             };
-            self.store.insert_approval(&approval).map_err(|_| {
-                RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Approval storage unavailable")
-            })?;
+            let approval_context = AuditContext {
+                request_id: Some(authorization.request_id.to_string()),
+                credential_id: Some(credential_id.to_string()),
+                capability_id: None,
+                browser_session_id: Some(authorization.browser_session_id.to_string()),
+                target_origin: Some(authorization.page_context.top_origin.to_string()),
+                action: Some(authorization.action.to_string()),
+                decision: Some("pending".to_string()),
+                risk_level: Some(format!("{:?}", authorization.decision.risk_level).to_lowercase()),
+                error_code: None,
+            };
+            {
+                let mut cursor = self.audit_cursor.lock().unwrap();
+                let audit_event = create_audit_event(
+                    cursor.next_sequence,
+                    &cursor.latest_hash,
+                    self.audit_key_version,
+                    self.audit_key.as_bytes(),
+                    "approval.requested",
+                    "broker",
+                    None,
+                    &approval_context,
+                    Utc::now(),
+                )
+                .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+                self.store
+                    .insert_approval_with_audit(&approval, &audit_event)
+                    .map_err(|_| {
+                        RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Approval storage unavailable")
+                    })?;
+                cursor.next_sequence += 1;
+                cursor.latest_hash = audit_event.event_hash;
+            }
             self.approvals.lock().unwrap().insert(
                 approval_id.clone(),
                 PendingApprovalEntry {
@@ -562,24 +696,6 @@ impl BrokerState {
                     authorization: authorization.clone(),
                 },
             );
-            self.record_audit_event(
-                "approval.requested",
-                "broker",
-                None,
-                &AuditContext {
-                    request_id: Some(authorization.request_id.to_string()),
-                    credential_id: Some(credential_id.to_string()),
-                    capability_id: None,
-                    browser_session_id: Some(authorization.browser_session_id.to_string()),
-                    target_origin: Some(authorization.page_context.top_origin.to_string()),
-                    action: Some(authorization.action.to_string()),
-                    decision: Some("pending".to_string()),
-                    risk_level: Some(
-                        format!("{:?}", authorization.decision.risk_level).to_lowercase(),
-                    ),
-                    error_code: None,
-                },
-            )?;
             let response = ActionResponseResult {
                 request_id: authorization.request_id,
                 state: ActionRequestState::AwaitingApproval,
@@ -668,6 +784,26 @@ impl BrokerState {
             .collect()
     }
 
+    pub fn expire_pending_approvals(&self, now: chrono::DateTime<Utc>) -> Result<usize, RpcError> {
+        let expired = self
+            .approvals
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| entry.approval.expires_at <= now)
+            .map(|entry| {
+                (
+                    entry.approval.approval_id.clone(),
+                    entry.approval.context_digest.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (approval_id, context_digest) in &expired {
+            self.decide_approval(approval_id, false, context_digest, "broker-timeout", false)?;
+        }
+        Ok(expired.len())
+    }
+
     pub fn decide_approval(
         &self,
         approval_id: &ApprovalId,
@@ -680,7 +816,8 @@ impl BrokerState {
             .approvals
             .lock()
             .unwrap()
-            .remove(approval_id)
+            .get(approval_id)
+            .cloned()
             .ok_or_else(|| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown approval ID"))?;
         let now = Utc::now();
         let latest_context = self
@@ -702,9 +839,9 @@ impl BrokerState {
             "expired"
         } else if context_digest != pending.approval.context_digest || !context_is_current {
             "invalidated"
-        } else if !approve {
-            "denied"
-        } else if pending.authorization.decision.require_user_presence && !presence_verified {
+        } else if !approve
+            || (pending.authorization.decision.require_user_presence && !presence_verified)
+        {
             "denied"
         } else {
             "approved"
@@ -717,32 +854,47 @@ impl BrokerState {
             "absent".to_string()
         });
         pending.approval.decided_at = Some(now);
-        self.store.update_approval(&pending.approval).map_err(|_| {
-            RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Approval storage unavailable")
-        })?;
-
-        self.record_audit_event(
-            match outcome {
-                "approved" => "approval.approved",
-                "denied" => "approval.denied",
-                _ => "approval.invalidated",
-            },
-            "user",
-            Some(actor.to_string()),
-            &AuditContext {
-                request_id: Some(pending.authorization.request_id.to_string()),
-                credential_id: Some(pending.authorization.credential.credential_id.to_string()),
-                capability_id: None,
-                browser_session_id: Some(pending.authorization.browser_session_id.to_string()),
-                target_origin: Some(pending.authorization.page_context.top_origin.to_string()),
-                action: Some(pending.authorization.action.to_string()),
-                decision: Some(outcome.to_string()),
-                risk_level: Some(
-                    format!("{:?}", pending.authorization.decision.risk_level).to_lowercase(),
-                ),
-                error_code: (outcome != "approved").then(|| "APPROVAL_REJECTED".to_string()),
-            },
-        )?;
+        let decision_context = AuditContext {
+            request_id: Some(pending.authorization.request_id.to_string()),
+            credential_id: Some(pending.authorization.credential.credential_id.to_string()),
+            capability_id: None,
+            browser_session_id: Some(pending.authorization.browser_session_id.to_string()),
+            target_origin: Some(pending.authorization.page_context.top_origin.to_string()),
+            action: Some(pending.authorization.action.to_string()),
+            decision: Some(outcome.to_string()),
+            risk_level: Some(
+                format!("{:?}", pending.authorization.decision.risk_level).to_lowercase(),
+            ),
+            error_code: (outcome != "approved").then(|| "APPROVAL_REJECTED".to_string()),
+        };
+        {
+            let mut cursor = self.audit_cursor.lock().unwrap();
+            let audit_event = create_audit_event(
+                cursor.next_sequence,
+                &cursor.latest_hash,
+                self.audit_key_version,
+                self.audit_key.as_bytes(),
+                match outcome {
+                    "approved" => "approval.approved",
+                    "denied" => "approval.denied",
+                    "expired" => "approval.expired",
+                    _ => "approval.invalidated",
+                },
+                "user",
+                Some(actor.to_string()),
+                &decision_context,
+                Utc::now(),
+            )
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+            self.store
+                .update_approval_with_audit(&pending.approval, &audit_event)
+                .map_err(|_| {
+                    RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Approval storage unavailable")
+                })?;
+            cursor.next_sequence += 1;
+            cursor.latest_hash = audit_event.event_hash;
+        }
+        self.approvals.lock().unwrap().remove(approval_id);
 
         if outcome == "approved" {
             return self
@@ -780,6 +932,7 @@ impl BrokerState {
             frame_origin: params.context.frame_origin.clone(),
             navigation_epoch: params.context.navigation_epoch,
             document_id: params.context.document_id.clone(),
+            path: params.context.path.clone(),
             path_sha256: params.context.path_sha256.clone(),
             tls: params.context.tls,
             incognito: params.context.incognito,
@@ -791,7 +944,21 @@ impl BrokerState {
         let mut matched = Vec::new();
 
         for (id, recipe) in recipes.iter() {
-            if recipe.top_origin.matches(&params.context.top_origin) {
+            if recipe
+                .match_rule
+                .top_origin
+                .matches(&params.context.top_origin)
+                && recipe
+                    .match_rule
+                    .frame_origin
+                    .as_ref()
+                    .is_none_or(|origin| origin.matches(&params.context.frame_origin))
+                && recipe
+                    .match_rule
+                    .path_prefix
+                    .as_ref()
+                    .is_none_or(|prefix| params.context.path.starts_with(prefix))
+            {
                 matched.push(id.clone());
             }
         }
@@ -807,7 +974,25 @@ impl BrokerState {
         &self,
         params: ExecutorConsumeParams,
     ) -> Result<ExecutorConsumeResult, RpcError> {
-        let now = Utc::now();
+        let mut now = Utc::now();
+        let totp_wait = {
+            let caps = self.capabilities.lock().unwrap();
+            caps.values()
+                .find(|entry| entry.token == params.capability_token)
+                .filter(|entry| entry.capability.action == ActionKind::AuthenticateTotp)
+                .and_then(|_| {
+                    let generator = secretctl_crypto::TotpGenerator::new();
+                    let (_, seconds_remaining) =
+                        generator.compute_time_step(now.timestamp() as u64);
+                    (seconds_remaining < 2).then_some(seconds_remaining)
+                })
+        };
+        if let Some(seconds) = totp_wait {
+            // Cross the boundary before atomically consuming the capability so
+            // a near-expiry code is never handed to the executor.
+            tokio::time::sleep(std::time::Duration::from_millis(seconds * 1_000 + 50)).await;
+            now = Utc::now();
+        }
         let pub_key = self.broker_key.public_key_bytes();
         let extension_key_id = {
             let sessions = self.sessions.read().unwrap();
@@ -832,13 +1017,10 @@ impl BrokerState {
             navigation_epoch: params.current_context.navigation_epoch,
         };
 
-        // Atomic capability lock and consumption
-        let (claims, recipe_id, provider_locator) = {
-            let mut caps = self.capabilities.lock().unwrap();
-
-            // Find matching capability entry
+        let (mut capability, recipe_id, provider_locator) = {
+            let caps = self.capabilities.lock().unwrap();
             let entry = caps
-                .values_mut()
+                .values()
                 .find(|e| e.token == params.capability_token)
                 .ok_or_else(|| {
                     RpcError::new(
@@ -847,55 +1029,96 @@ impl BrokerState {
                     )
                 })?;
 
-            // Perform single-use atomic consumption check
-            let claims = verify_and_consume_capability(
-                &mut entry.capability,
-                &params.capability_token,
-                &pub_key,
-                &context_snapshot,
-                now,
-            )
-            .map_err(|e| match e {
-                secretctl_capability::CapabilityError::Expired(_) => {
-                    RpcError::new(RpcErrorCode::CAPABILITY_EXPIRED, "Capability expired")
-                }
-                secretctl_capability::CapabilityError::AlreadyConsumed { .. } => RpcError::new(
-                    RpcErrorCode::CAPABILITY_CONSUMED,
-                    "Capability already consumed",
-                ),
-                secretctl_capability::CapabilityError::EpochMismatch { .. } => {
-                    RpcError::new(RpcErrorCode::EPOCH_INVALIDATED, "Epoch mismatch")
-                }
-                secretctl_capability::CapabilityError::BindingMismatch { .. } => {
-                    RpcError::new(RpcErrorCode::ORIGIN_MISMATCH, "Context binding mismatch")
-                }
-                _ => RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "Capability rejected"),
-            })?;
-
             (
-                claims,
+                entry.capability.clone(),
                 entry.recipe_id.clone(),
                 entry.provider_locator.clone(),
             )
         };
+        let claims = verify_and_consume_capability(
+            &mut capability,
+            &params.capability_token,
+            &pub_key,
+            &context_snapshot,
+            now,
+        )
+        .map_err(|e| match e {
+            secretctl_capability::CapabilityError::Expired(_) => {
+                RpcError::new(RpcErrorCode::CAPABILITY_EXPIRED, "Capability expired")
+            }
+            secretctl_capability::CapabilityError::AlreadyConsumed { .. } => RpcError::new(
+                RpcErrorCode::CAPABILITY_CONSUMED,
+                "Capability already consumed",
+            ),
+            secretctl_capability::CapabilityError::EpochMismatch { .. } => {
+                RpcError::new(RpcErrorCode::EPOCH_INVALIDATED, "Epoch mismatch")
+            }
+            secretctl_capability::CapabilityError::BindingMismatch { .. } => {
+                RpcError::new(RpcErrorCode::ORIGIN_MISMATCH, "Context binding mismatch")
+            }
+            _ => RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "Capability rejected"),
+        })?;
 
-        // Audit capability consumed
-        self.record_audit_event(
-            "capability.consumed",
-            "executor",
-            None,
-            &AuditContext {
-                request_id: Some(claims.req_id.to_string()),
-                credential_id: Some(claims.cred_id.to_string()),
-                capability_id: Some(claims.jti.to_string()),
-                browser_session_id: Some(claims.browser_session_id.to_string()),
-                target_origin: Some(claims.top_origin.to_string()),
-                action: Some(claims.action.to_string()),
-                decision: None,
-                risk_level: None,
-                error_code: None,
+        let execution_id = ExecutionId::new();
+        let execution = Execution {
+            execution_id: execution_id.clone(),
+            capability_id: claims.jti.clone(),
+            state: ExecutionState::Consuming,
+            prepared_context_digest: None,
+            started_at: Some(now),
+            completed_at: None,
+            result_code: None,
+        };
+        let consume_audit_context = AuditContext {
+            request_id: Some(claims.req_id.to_string()),
+            credential_id: Some(claims.cred_id.to_string()),
+            capability_id: Some(claims.jti.to_string()),
+            browser_session_id: Some(claims.browser_session_id.to_string()),
+            target_origin: Some(claims.top_origin.to_string()),
+            action: Some(claims.action.to_string()),
+            decision: None,
+            risk_level: None,
+            error_code: None,
+        };
+        {
+            let mut cursor = self.audit_cursor.lock().unwrap();
+            let audit_event = create_audit_event(
+                cursor.next_sequence,
+                &cursor.latest_hash,
+                self.audit_key_version,
+                self.audit_key.as_bytes(),
+                "capability.consumed",
+                "executor",
+                None,
+                &consume_audit_context,
+                Utc::now(),
+            )
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+            self.store
+                .consume_capability_with_execution_and_audit(&claims.jti, &execution, &audit_event)
+                .map_err(|error| match error {
+                    secretctl_store::StoreError::StateConflict(_) => RpcError::new(
+                        RpcErrorCode::CAPABILITY_CONSUMED,
+                        "Capability already consumed",
+                    ),
+                    _ => RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Durable consume unavailable"),
+                })?;
+            cursor.next_sequence += 1;
+            cursor.latest_hash = audit_event.event_hash;
+        }
+        if let Some(entry) = self.capabilities.lock().unwrap().get_mut(&claims.jti) {
+            entry.capability = capability;
+        }
+        self.executions.lock().unwrap().insert(
+            execution_id.clone(),
+            ActiveExecution {
+                execution,
+                request_id: claims.req_id.clone(),
+                agent_id: claims.agent_id.clone(),
+                credential_id: claims.cred_id.clone(),
+                action: claims.action,
             },
-        )?;
+        );
 
         let recipe = {
             let recipes = self.recipes.read().unwrap();
@@ -1043,31 +1266,6 @@ impl BrokerState {
             },
         )?;
 
-        let execution_id = ExecutionId::new();
-
-        // Create execution entry
-        {
-            let mut execs = self.executions.lock().unwrap();
-            execs.insert(
-                execution_id.clone(),
-                ActiveExecution {
-                    execution: Execution {
-                        execution_id: execution_id.clone(),
-                        capability_id: claims.jti.clone(),
-                        state: ExecutionState::Consuming,
-                        prepared_context_digest: None,
-                        started_at: Some(now),
-                        completed_at: None,
-                        result_code: None,
-                    },
-                    request_id: claims.req_id,
-                    agent_id: claims.agent_id,
-                    credential_id: claims.cred_id,
-                    action: claims.action,
-                },
-            );
-        }
-
         Ok(ExecutorConsumeResult {
             execution_id,
             recipe_id,
@@ -1099,44 +1297,71 @@ impl BrokerState {
             )
         };
 
-        // Audit execution completion
-        self.record_audit_event(
-            if params.status == "completed" {
-                "executor.completed"
+        let mut completed_execution = {
+            let execs = self.executions.lock().unwrap();
+            execs
+                .get(&params.execution_id)
+                .ok_or_else(|| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown execution ID"))?
+                .execution
+                .clone()
+        };
+        completed_execution.state = if params.status == "completed" {
+            ExecutionState::Completed
+        } else {
+            ExecutionState::Failed
+        };
+        completed_execution.completed_at = Some(Utc::now());
+        completed_execution.result_code = Some(params.result_code.clone());
+        let completion_context = AuditContext {
+            request_id: Some(req_id.to_string()),
+            credential_id: Some(cred_id.to_string()),
+            capability_id: Some(cap_id.to_string()),
+            browser_session_id: None,
+            target_origin: None,
+            action: Some(act.to_string()),
+            decision: None,
+            risk_level: None,
+            error_code: if params.status == "failed" {
+                Some(params.result_code.clone())
             } else {
-                "executor.failed"
+                None
             },
-            "executor",
-            None,
-            &AuditContext {
-                request_id: Some(req_id.to_string()),
-                credential_id: Some(cred_id.to_string()),
-                capability_id: Some(cap_id.to_string()),
-                browser_session_id: None,
-                target_origin: None,
-                action: Some(act.to_string()),
-                decision: None,
-                risk_level: None,
-                error_code: if params.status == "failed" {
-                    Some(params.result_code.clone())
+        };
+        {
+            let mut cursor = self.audit_cursor.lock().unwrap();
+            let audit_event = create_audit_event(
+                cursor.next_sequence,
+                &cursor.latest_hash,
+                self.audit_key_version,
+                self.audit_key.as_bytes(),
+                if params.status == "completed" {
+                    "execution.completed"
                 } else {
-                    None
+                    "execution.failed"
                 },
-            },
-        )?;
-
+                "executor",
+                None,
+                &completion_context,
+                Utc::now(),
+            )
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+            self.store
+                .finish_execution_with_audit(&completed_execution, &audit_event)
+                .map_err(|_| {
+                    RpcError::new(
+                        RpcErrorCode::INTERNAL_ERROR,
+                        "Durable execution result unavailable",
+                    )
+                })?;
+            cursor.next_sequence += 1;
+            cursor.latest_hash = audit_event.event_hash;
+        }
         {
             let mut execs = self.executions.lock().unwrap();
             let active = execs.get_mut(&params.execution_id).ok_or_else(|| {
                 RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown execution ID")
             })?;
-            active.execution.state = if params.status == "completed" {
-                ExecutionState::Completed
-            } else {
-                ExecutionState::Failed
-            };
-            active.execution.completed_at = Some(Utc::now());
-            active.execution.result_code = Some(params.result_code.clone());
+            active.execution = completed_execution;
         }
 
         if let Some(request) = self.requests.write().unwrap().get_mut(&req_id) {
@@ -1234,33 +1459,105 @@ impl BrokerState {
 
     pub fn replace_policy(&self, evaluator: PolicyEvaluator) -> Result<usize, RpcError> {
         let new_hash = evaluator.policy_hash().to_vec();
+        let policy_context = AuditContext {
+            request_id: None,
+            credential_id: None,
+            capability_id: None,
+            browser_session_id: None,
+            target_origin: None,
+            action: None,
+            decision: Some("policy_hash_changed".to_string()),
+            risk_level: None,
+            error_code: None,
+        };
+        let revoked = {
+            let mut cursor = self.audit_cursor.lock().unwrap();
+            let audit_event = create_audit_event(
+                cursor.next_sequence,
+                &cursor.latest_hash,
+                self.audit_key_version,
+                self.audit_key.as_bytes(),
+                "policy.reloaded",
+                "admin",
+                None,
+                &policy_context,
+                Utc::now(),
+            )
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+            let revoked = self
+                .store
+                .revoke_capabilities_not_policy_with_audit(&new_hash, &audit_event)
+                .map_err(|_| {
+                    RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Policy reload unavailable")
+                })?;
+            cursor.next_sequence += 1;
+            cursor.latest_hash = audit_event.event_hash;
+            revoked
+        };
         *self.policy_evaluator.write().unwrap() = evaluator;
-        let mut revoked = 0;
-        let mut capabilities = self.capabilities.lock().unwrap();
-        for entry in capabilities.values_mut() {
+        for entry in self.capabilities.lock().unwrap().values_mut() {
             if entry.capability.policy_hash != new_hash && !entry.capability.state.is_terminal() {
                 entry.capability.state = secretctl_domain::CapabilityState::Revoked;
                 entry.capability.revoked_reason = Some("policy_changed".to_string());
-                revoked += 1;
             }
         }
-        drop(capabilities);
-        self.record_audit_event(
-            "policy.reloaded",
-            "admin",
-            None,
-            &AuditContext {
-                request_id: None,
-                credential_id: None,
-                capability_id: None,
-                browser_session_id: None,
-                target_origin: None,
-                action: None,
-                decision: Some(format!("revoked_{revoked}")),
-                risk_level: None,
-                error_code: None,
-            },
-        )?;
         Ok(revoked)
+    }
+
+    pub fn list_capabilities(
+        &self,
+        state: Option<&str>,
+    ) -> Result<Vec<secretctl_domain::CapabilitySummary>, RpcError> {
+        self.store.list_capabilities(state).map_err(|_| {
+            RpcError::new(
+                RpcErrorCode::INTERNAL_ERROR,
+                "Capability storage unavailable",
+            )
+        })
+    }
+
+    pub fn revoke_capability_admin(
+        &self,
+        capability_id: &CapabilityId,
+        reason: &str,
+    ) -> Result<(), RpcError> {
+        let context = AuditContext {
+            request_id: None,
+            credential_id: None,
+            capability_id: Some(capability_id.to_string()),
+            browser_session_id: None,
+            target_origin: None,
+            action: None,
+            decision: Some("admin_revoked".to_string()),
+            risk_level: None,
+            error_code: None,
+        };
+        {
+            let mut cursor = self.audit_cursor.lock().unwrap();
+            let event = create_audit_event(
+                cursor.next_sequence,
+                &cursor.latest_hash,
+                self.audit_key_version,
+                self.audit_key.as_bytes(),
+                "capability.revoked",
+                "admin",
+                None,
+                &context,
+                Utc::now(),
+            )
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+            self.store
+                .revoke_capability_with_audit(capability_id, reason, &event)
+                .map_err(|_| {
+                    RpcError::new(RpcErrorCode::INVALID_PARAMS, "Capability is not active")
+                })?;
+            cursor.next_sequence += 1;
+            cursor.latest_hash = event.event_hash;
+        }
+        if let Some(entry) = self.capabilities.lock().unwrap().get_mut(capability_id) {
+            entry.capability.state = secretctl_domain::CapabilityState::Revoked;
+            entry.capability.revoked_reason = Some(reason.to_string());
+        }
+        Ok(())
     }
 }

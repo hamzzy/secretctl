@@ -8,6 +8,7 @@ use secretctl_domain::{
     CapabilityState, CredentialId, RecipeId, RequestId,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityClaims {
@@ -36,6 +37,7 @@ pub struct CapabilityClaims {
     pub issuer_key_id: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn mint_capability(
     broker_key: &KeyPair,
     issuer_key_id: &str,
@@ -155,6 +157,33 @@ pub fn parse_and_verify_token(
     Ok(claims)
 }
 
+pub fn parse_and_verify_token_with_keys(
+    token: &str,
+    active_keys: &HashMap<String, Vec<u8>>,
+) -> Result<CapabilityClaims, CapabilityError> {
+    let claims_part = token
+        .split('.')
+        .next()
+        .ok_or_else(|| CapabilityError::Serialization("Malformed token format".to_string()))?;
+    let claims_bytes = URL_SAFE_NO_PAD
+        .decode(claims_part)
+        .map_err(|error| CapabilityError::Serialization(error.to_string()))?;
+    let unverified: CapabilityClaims = serde_json::from_slice(&claims_bytes)
+        .map_err(|error| CapabilityError::Serialization(error.to_string()))?;
+    let public_key = active_keys
+        .get(&unverified.issuer_key_id)
+        .ok_or(CapabilityError::InvalidSignature)?;
+    let public_key: &[u8; 32] = public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| CapabilityError::InvalidSignature)?;
+    let verified = parse_and_verify_token(token, public_key)?;
+    if verified.issuer_key_id != unverified.issuer_key_id {
+        return Err(CapabilityError::InvalidSignature);
+    }
+    Ok(verified)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +225,41 @@ mod tests {
         let verified_claims = parse_and_verify_token(&token, &pk).expect("should verify token");
         assert_eq!(verified_claims.jti, cap.capability_id);
         assert_eq!(verified_claims.top_origin, top_origin);
+    }
+
+    #[test]
+    fn key_rotation_rejects_retired_and_unknown_signers() {
+        let old_key = KeyPair::generate();
+        let new_key = KeyPair::generate();
+        let origin = CanonicalOrigin::parse("https://github.com:443").unwrap();
+        let (_, old_token) = mint_capability(
+            &old_key,
+            "old-key",
+            RequestId::new(),
+            AgentId::new(),
+            CredentialId::new(),
+            ActionKind::AuthenticatePassword,
+            origin.clone(),
+            origin,
+            BrowserSessionId::new(),
+            "ext-key-1".to_string(),
+            1,
+            0,
+            "doc".to_string(),
+            1,
+            RecipeId::parse("rcp_login").unwrap(),
+            vec![1],
+            vec![2],
+            Utc::now(),
+            30,
+            1,
+        );
+        let active_old =
+            HashMap::from([("old-key".to_string(), old_key.public_key_bytes().to_vec())]);
+        assert!(parse_and_verify_token_with_keys(&old_token, &active_old).is_ok());
+        let active_new =
+            HashMap::from([("new-key".to_string(), new_key.public_key_bytes().to_vec())]);
+        assert!(parse_and_verify_token_with_keys(&old_token, &active_new).is_err());
+        assert!(parse_and_verify_token_with_keys(&old_token, &HashMap::new()).is_err());
     }
 }

@@ -35,7 +35,7 @@ pub fn sanitize_error_message(message: &str) -> String {
     let mut sanitized = message.to_string();
     for prohibited in PROHIBITED_KEYS {
         if sanitized.to_ascii_lowercase().contains(prohibited) {
-            sanitized = format!("[REDACTED_SECURITY_ERROR]");
+            sanitized = "[REDACTED_SECURITY_ERROR]".to_string();
             break;
         }
     }

@@ -16,8 +16,8 @@ impl SecureChannel {
     pub fn new_client(shared_secret: &[u8; 32], salt: &[u8], info: &[u8]) -> Self {
         let (tx_key, rx_key) = Self::derive_directional_keys(shared_secret, salt, info);
         Self {
-            tx_cipher: ChaCha20Poly1305::new(&Key::from_slice(&tx_key)),
-            rx_cipher: ChaCha20Poly1305::new(&Key::from_slice(&rx_key)),
+            tx_cipher: ChaCha20Poly1305::new(Key::from_slice(&tx_key)),
+            rx_cipher: ChaCha20Poly1305::new(Key::from_slice(&rx_key)),
             tx_nonce: 0,
             rx_nonce: 0,
         }
@@ -27,8 +27,8 @@ impl SecureChannel {
         let (client_tx, client_rx) = Self::derive_directional_keys(shared_secret, salt, info);
         // Server transmits on client_rx, receives on client_tx
         Self {
-            tx_cipher: ChaCha20Poly1305::new(&Key::from_slice(&client_rx)),
-            rx_cipher: ChaCha20Poly1305::new(&Key::from_slice(&client_tx)),
+            tx_cipher: ChaCha20Poly1305::new(Key::from_slice(&client_rx)),
+            rx_cipher: ChaCha20Poly1305::new(Key::from_slice(&client_tx)),
             tx_nonce: 0,
             rx_nonce: 0,
         }
