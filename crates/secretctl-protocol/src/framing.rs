@@ -84,7 +84,10 @@ mod tests {
         let payload = b"{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"ping\"}".to_vec();
         codec.encode(payload.clone(), &mut buffer).unwrap();
 
-        let decoded = codec.decode(&mut buffer).unwrap().expect("should decode frame");
+        let decoded = codec
+            .decode(&mut buffer)
+            .unwrap()
+            .expect("should decode frame");
         assert_eq!(decoded, payload);
     }
 

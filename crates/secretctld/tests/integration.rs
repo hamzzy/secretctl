@@ -36,7 +36,11 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
     for (name, kind, action) in [
         ("github-work", "password", ActionKind::AuthenticatePassword),
         ("github-totp", "totp", ActionKind::AuthenticateTotp),
-        ("account-recovery", "sensitive_form", ActionKind::FormSensitiveFill),
+        (
+            "account-recovery",
+            "sensitive_form",
+            ActionKind::FormSensitiveFill,
+        ),
     ] {
         store
             .insert_credential(&CredentialDescriptor {
@@ -59,7 +63,11 @@ async fn setup_test_broker() -> (BrokerState, BrowserSessionId, CanonicalOrigin)
         description: Some("Allow github login and totp".to_string()),
         effect: secretctl_domain::PolicyEffect::Allow,
         principals: vec!["*".to_string()],
-        credentials: vec!["github-work".to_string(), "github-totp".to_string(), "account-recovery".to_string()],
+        credentials: vec![
+            "github-work".to_string(),
+            "github-totp".to_string(),
+            "account-recovery".to_string(),
+        ],
         actions: vec![
             ActionKind::AuthenticatePassword,
             ActionKind::AuthenticateTotp,
@@ -204,7 +212,10 @@ async fn test_full_fake_executor_flow_success() {
         .await
         .expect("action request should succeed");
 
-    assert_eq!(agent_resp.state, secretctl_domain::ActionRequestState::CapabilityIssued);
+    assert_eq!(
+        agent_resp.state,
+        secretctl_domain::ActionRequestState::CapabilityIssued
+    );
     // Security check: Zero secrets in agent response!
     let serialized_agent_resp = serde_json::to_string(&agent_resp).unwrap();
     assert!(!serialized_agent_resp.contains("super_secret"));
@@ -253,7 +264,10 @@ async fn test_full_fake_executor_flow_success() {
         .expect("consume should succeed");
 
     assert_eq!(consume_resp.fields.len(), 1);
-    assert_eq!(consume_resp.fields[0].encrypted_value, "super_secret_password_123");
+    assert_eq!(
+        consume_resp.fields[0].encrypted_value,
+        "super_secret_password_123"
+    );
 
     // 5. Executor reports result
     let result_params = ExecutorResultParams {
@@ -340,7 +354,10 @@ async fn test_concurrent_consume_race_condition() {
         match handle.await.unwrap() {
             Ok(_) => success_count += 1,
             Err(err) => {
-                assert_eq!(err.code, secretctl_protocol::RpcErrorCode::CAPABILITY_CONSUMED.0);
+                assert_eq!(
+                    err.code,
+                    secretctl_protocol::RpcErrorCode::CAPABILITY_CONSUMED.0
+                );
                 failure_count += 1;
             }
         }
@@ -407,7 +424,10 @@ async fn test_epoch_invalidation_fails_closed() {
 
     assert!(consume_res.is_err());
     let err = consume_res.unwrap_err();
-    assert_eq!(err.code, secretctl_protocol::RpcErrorCode::EPOCH_INVALIDATED.0);
+    assert_eq!(
+        err.code,
+        secretctl_protocol::RpcErrorCode::EPOCH_INVALIDATED.0
+    );
 }
 
 #[tokio::test]
@@ -438,7 +458,10 @@ async fn test_totp_execution_flow() {
         .await
         .expect("TOTP action request should succeed");
 
-    assert_eq!(agent_resp.state, secretctl_domain::ActionRequestState::CapabilityIssued);
+    assert_eq!(
+        agent_resp.state,
+        secretctl_domain::ActionRequestState::CapabilityIssued
+    );
 
     let token = {
         let caps = broker.capabilities.lock().unwrap();
@@ -471,7 +494,12 @@ async fn test_totp_execution_flow() {
     assert_eq!(consume_resp.fields.len(), 1);
     assert_eq!(consume_resp.fields[0].role, "totp_code");
     assert_eq!(consume_resp.fields[0].encrypted_value.len(), 6);
-    assert!(consume_resp.fields[0].encrypted_value.chars().all(|c| c.is_ascii_digit()));
+    assert!(
+        consume_resp.fields[0]
+            .encrypted_value
+            .chars()
+            .all(|c| c.is_ascii_digit())
+    );
 }
 
 #[tokio::test]
@@ -502,7 +530,10 @@ async fn test_sensitive_form_fill_flow() {
         .await
         .expect("form fill request should succeed");
 
-    assert_eq!(agent_resp.state, secretctl_domain::ActionRequestState::CapabilityIssued);
+    assert_eq!(
+        agent_resp.state,
+        secretctl_domain::ActionRequestState::CapabilityIssued
+    );
 
     let token = {
         let caps = broker.capabilities.lock().unwrap();

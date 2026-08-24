@@ -1,12 +1,11 @@
-use base64::Engine;
 use crate::state::BrokerState;
+use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use secretctl_domain::AgentId;
 use secretctl_protocol::{
     ActionCancelParams, ActionRequestParams, ActionStatusParams, ExecutorConsumeParams,
-    ExecutorHeartbeatParams, ExecutorPrepareParams,
-    ExecutorResultParams, LengthPrefixedCodec, RpcError, RpcErrorCode, RpcRequest,
-    RpcResponse, SessionHelloParams, SessionHelloResult,
+    ExecutorHeartbeatParams, ExecutorPrepareParams, ExecutorResultParams, LengthPrefixedCodec,
+    RpcError, RpcErrorCode, RpcRequest, RpcResponse, SessionHelloParams, SessionHelloResult,
 };
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
@@ -132,31 +131,36 @@ async fn handle_agent_connection(stream: UnixStream, state: BrokerState) -> anyh
 
         let response: RpcResponse<serde_json::Value> = match method {
             "session.hello" => {
-                let params: SessionHelloParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                let params: SessionHelloParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
                 if params.protocol_version != "1.0"
                     || params.role != "agent"
                     || !state.store.agent_exists(&params.principal_id)?
                 {
                     RpcResponse::error(
                         id,
-                        RpcError::new(RpcErrorCode::SECURITY_VIOLATION, "Agent enrollment rejected"),
+                        RpcError::new(
+                            RpcErrorCode::SECURITY_VIOLATION,
+                            "Agent enrollment rejected",
+                        ),
                     )
                 } else {
                     authenticated_agent = Some(AgentId::parse(&params.principal_id)?);
-                let res = SessionHelloResult {
-                    protocol_version: "1.0".to_string(),
-                    server_nonce: uuid::Uuid::new_v4().to_string(),
-                    ephemeral_public_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
-                        .encode(state.broker_key.public_key_bytes()),
-                    server_key_id: state.key_id.clone(),
-                    signature: "mock_handshake_sig".to_string(),
-                };
-                RpcResponse::success(id, serde_json::to_value(res)?)
+                    let res = SessionHelloResult {
+                        protocol_version: "1.0".to_string(),
+                        server_nonce: uuid::Uuid::new_v4().to_string(),
+                        ephemeral_public_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode(state.broker_key.public_key_bytes()),
+                        server_key_id: state.key_id.clone(),
+                        signature: "mock_handshake_sig".to_string(),
+                    };
+                    RpcResponse::success(id, serde_json::to_value(res)?)
                 }
             }
             "action.request" => {
                 if let Some(agent_id) = authenticated_agent.clone() {
-                    let params: ActionRequestParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                    let params: ActionRequestParams =
+                        serde_json::from_value(rpc_req.params.unwrap_or_default())?;
                     match state.handle_action_request(agent_id, params).await {
                         Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
                         Err(err) => RpcResponse::error(id, err),
@@ -223,28 +227,32 @@ async fn handle_executor_connection(stream: UnixStream, state: BrokerState) -> a
 
         let response: RpcResponse<serde_json::Value> = match method {
             "executor.prepare" => {
-                let params: ExecutorPrepareParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                let params: ExecutorPrepareParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
                 match state.handle_executor_prepare(params).await {
                     Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
                     Err(err) => RpcResponse::error(id, err),
                 }
             }
             "executor.consume" => {
-                let params: ExecutorConsumeParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                let params: ExecutorConsumeParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
                 match state.handle_executor_consume(params).await {
                     Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
                     Err(err) => RpcResponse::error(id, err),
                 }
             }
             "executor.result" => {
-                let params: ExecutorResultParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                let params: ExecutorResultParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
                 match state.handle_executor_result(params).await {
                     Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
                     Err(err) => RpcResponse::error(id, err),
                 }
             }
             "executor.heartbeat" => {
-                let params: ExecutorHeartbeatParams = serde_json::from_value(rpc_req.params.unwrap_or_default())?;
+                let params: ExecutorHeartbeatParams =
+                    serde_json::from_value(rpc_req.params.unwrap_or_default())?;
                 match state.handle_executor_heartbeat(params).await {
                     Ok(res) => RpcResponse::success(id, serde_json::to_value(res)?),
                     Err(err) => RpcResponse::error(id, err),

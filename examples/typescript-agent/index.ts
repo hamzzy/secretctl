@@ -2,7 +2,9 @@ import { SecretCtl } from "../../sdk/typescript/src/index.js";
 
 async function main() {
   console.log("Connecting AI agent to secretctl broker...");
-  const secretctl = await SecretCtl.connect();
+  const principalId = process.env.SECRETCTL_PRINCIPAL_ID;
+  if (!principalId) throw new Error("SECRETCTL_PRINCIPAL_ID is required");
+  const secretctl = await SecretCtl.connect({ principalId });
 
   console.log("Requesting password authentication for 'github-work'...");
   const result = await secretctl.execute({

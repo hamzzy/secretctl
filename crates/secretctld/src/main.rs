@@ -21,11 +21,19 @@ async fn main() -> anyhow::Result<()> {
     let store = SqliteStore::open(&db_path)?;
 
     let provider = Arc::new(MacOsKeychainProvider::new());
-    let broker_key_bytes = provider
-        .get_secret("installation-signing-key")
-        .await
-        .map_err(|_| anyhow::anyhow!("installation signing key unavailable; run `secretctl init`"))?;
-    let broker_key = KeyPair::from_bytes(broker_key_bytes.as_bytes())?;
+    let broker_key = if provider.exists("installation-signing-key").await.unwrap_or(false) {
+        let secret = provider.get_secret("installation-signing-key").await?;
+        KeyPair::from_bytes(secret.as_bytes())?
+    } else {
+        info!("No installation signing key found. Generating a new key in macOS Keychain...");
+        let keypair = KeyPair::generate();
+        provider
+            .store_secret("installation-signing-key", &keypair.to_bytes())
+            .await?;
+        let key_path = secretctl_dir.join("broker_key.pub");
+        let _ = tokio::fs::write(&key_path, keypair.public_key_bytes()).await;
+        keypair
+    };
 
     let default_policy = PolicyDocument {
         version: "1.0".to_string(),

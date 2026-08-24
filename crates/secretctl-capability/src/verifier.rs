@@ -1,5 +1,5 @@
 use crate::error::CapabilityError;
-use crate::token::{parse_and_verify_token, CapabilityClaims};
+use crate::token::{CapabilityClaims, parse_and_verify_token};
 use chrono::{DateTime, Utc};
 use secretctl_domain::{BrowserSessionId, CanonicalOrigin, Capability, CapabilityState};
 
@@ -73,7 +73,8 @@ pub fn verify_and_consume_capability(
     }
 
     // 4. Check state and used count
-    if capability.state == CapabilityState::Consumed || capability.used_count >= capability.max_uses {
+    if capability.state == CapabilityState::Consumed || capability.used_count >= capability.max_uses
+    {
         return Err(CapabilityError::AlreadyConsumed {
             max: capability.max_uses,
             used: capability.used_count,

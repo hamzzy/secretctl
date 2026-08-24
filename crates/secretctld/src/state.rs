@@ -1,21 +1,20 @@
 use chrono::Utc;
-use secretctl_audit::{create_audit_event, AuditContext};
+use secretctl_audit::{AuditContext, create_audit_event};
 use secretctl_capability::{
-    mint_capability, verify_and_consume_capability, CapabilityClaims, ExecutionContextSnapshot,
+    CapabilityClaims, ExecutionContextSnapshot, mint_capability, verify_and_consume_capability,
 };
 use secretctl_crypto::KeyPair;
 use secretctl_domain::{
-    ActionKind, ActionRequestState, AgentId, BrowserSession, BrowserSessionId, PageContext,
-    BrowserSessionState, Capability, CapabilityId, CredentialId,
-    Execution, ExecutionId, ExecutionState, RecipeId, RequestId, SiteRecipe,
+    ActionKind, ActionRequestState, AgentId, BrowserSession, BrowserSessionId, BrowserSessionState,
+    Capability, CapabilityId, CredentialId, Execution, ExecutionId, ExecutionState, PageContext,
+    RecipeId, RequestId, SiteRecipe,
 };
 use secretctl_policy::PolicyEvaluator;
 use secretctl_protocol::{
     ActionCancelParams, ActionCancelResult, ActionRequestParams, ActionResponseResult,
-    ActionStatusParams, ActionStatusResult, ExecutorConsumeParams,
-    ExecutorConsumeResult, ExecutorHeartbeatParams,
-    ExecutorHeartbeatResult, ExecutorPrepareParams, ExecutorPrepareResult, ExecutorResultParams,
-    ExecutorResultResult, ResolvedFieldInjection, RpcError, RpcErrorCode,
+    ActionStatusParams, ActionStatusResult, ExecutorConsumeParams, ExecutorConsumeResult,
+    ExecutorHeartbeatParams, ExecutorHeartbeatResult, ExecutorPrepareParams, ExecutorPrepareResult,
+    ExecutorResultParams, ExecutorResultResult, ResolvedFieldInjection, RpcError, RpcErrorCode,
 };
 use secretctl_providers::SecretProvider;
 use secretctl_store::SqliteStore;
@@ -156,7 +155,9 @@ impl BrokerState {
         let credential = self
             .store
             .get_credential_by_name(&params.identity)
-            .map_err(|_| RpcError::new(RpcErrorCode::AUTH_POLICY_DENIED, "Identity is unavailable"))?;
+            .map_err(|_| {
+                RpcError::new(RpcErrorCode::AUTH_POLICY_DENIED, "Identity is unavailable")
+            })?;
         if credential.disabled_at.is_some()
             || !credential.allowed_actions.contains(&params.action)
             || credential.provider != self.provider.provider_name()
@@ -190,14 +191,12 @@ impl BrokerState {
         // 2. Validate browser session exists and is active
         let (assurance, extension_key_id) = {
             let sessions = self.sessions.read().unwrap();
-            let active = sessions
-                .get(&params.browser_session_id)
-                .ok_or_else(|| {
-                    RpcError::new(
-                        RpcErrorCode::SESSION_TERMINATED,
-                        "Browser session not found or inactive",
-                    )
-                })?;
+            let active = sessions.get(&params.browser_session_id).ok_or_else(|| {
+                RpcError::new(
+                    RpcErrorCode::SESSION_TERMINATED,
+                    "Browser session not found or inactive",
+                )
+            })?;
             if active.session.state != BrowserSessionState::Active {
                 return Err(RpcError::new(
                     RpcErrorCode::SESSION_TERMINATED,
@@ -221,7 +220,10 @@ impl BrokerState {
         let measured_context = {
             let contexts = self.page_contexts.read().unwrap();
             let session_contexts = contexts.get(&params.browser_session_id).ok_or_else(|| {
-                RpcError::new(RpcErrorCode::ORIGIN_MISMATCH, "Verified page context unavailable")
+                RpcError::new(
+                    RpcErrorCode::ORIGIN_MISMATCH,
+                    "Verified page context unavailable",
+                )
             })?;
             let context = params
                 .tab_hint
@@ -234,7 +236,10 @@ impl BrokerState {
                     }
                 })
                 .ok_or_else(|| {
-                    RpcError::new(RpcErrorCode::ORIGIN_MISMATCH, "Verified tab context unavailable")
+                    RpcError::new(
+                        RpcErrorCode::ORIGIN_MISMATCH,
+                        "Verified tab context unavailable",
+                    )
                 })?;
             if now - context.observed_at > chrono::Duration::seconds(2) {
                 return Err(RpcError::new(
@@ -306,7 +311,12 @@ impl BrokerState {
                             .is_none_or(|origin| origin.matches(&measured_context.frame_origin))
                 })
                 .cloned()
-                .ok_or_else(|| RpcError::new(RpcErrorCode::RECIPE_NOT_FOUND, "No enabled recipe matches verified context"))?
+                .ok_or_else(|| {
+                    RpcError::new(
+                        RpcErrorCode::RECIPE_NOT_FOUND,
+                        "No enabled recipe matches verified context",
+                    )
+                })?
         };
 
         // 5. Mint capability
@@ -398,12 +408,15 @@ impl BrokerState {
         params: ActionStatusParams,
     ) -> Result<ActionStatusResult, RpcError> {
         if self.request_agents.read().unwrap().get(&params.request_id) != Some(agent_id) {
-            return Err(RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown request ID"));
+            return Err(RpcError::new(
+                RpcErrorCode::INVALID_PARAMS,
+                "Unknown request ID",
+            ));
         }
         let requests = self.requests.read().unwrap();
-        let request = requests.get(&params.request_id).ok_or_else(|| {
-            RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown request ID")
-        })?;
+        let request = requests
+            .get(&params.request_id)
+            .ok_or_else(|| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown request ID"))?;
         Ok(ActionStatusResult {
             request_id: request.request_id.clone(),
             state: request.state,
@@ -417,12 +430,15 @@ impl BrokerState {
         params: ActionCancelParams,
     ) -> Result<ActionCancelResult, RpcError> {
         if self.request_agents.read().unwrap().get(&params.request_id) != Some(agent_id) {
-            return Err(RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown request ID"));
+            return Err(RpcError::new(
+                RpcErrorCode::INVALID_PARAMS,
+                "Unknown request ID",
+            ));
         }
         let mut requests = self.requests.write().unwrap();
-        let request = requests.get_mut(&params.request_id).ok_or_else(|| {
-            RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown request ID")
-        })?;
+        let request = requests
+            .get_mut(&params.request_id)
+            .ok_or_else(|| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown request ID"))?;
         if request.state.is_terminal() || request.state == ActionRequestState::Executing {
             return Ok(ActionCancelResult {
                 request_id: params.request_id,
@@ -518,7 +534,10 @@ impl BrokerState {
                 .values_mut()
                 .find(|e| e.token == params.capability_token)
                 .ok_or_else(|| {
-                    RpcError::new(RpcErrorCode::CAPABILITY_CONSUMED, "Invalid or unknown capability token")
+                    RpcError::new(
+                        RpcErrorCode::CAPABILITY_CONSUMED,
+                        "Invalid or unknown capability token",
+                    )
                 })?;
 
             // Perform single-use atomic consumption check
@@ -533,9 +552,10 @@ impl BrokerState {
                 secretctl_capability::CapabilityError::Expired(_) => {
                     RpcError::new(RpcErrorCode::CAPABILITY_EXPIRED, "Capability expired")
                 }
-                secretctl_capability::CapabilityError::AlreadyConsumed { .. } => {
-                    RpcError::new(RpcErrorCode::CAPABILITY_CONSUMED, "Capability already consumed")
-                }
+                secretctl_capability::CapabilityError::AlreadyConsumed { .. } => RpcError::new(
+                    RpcErrorCode::CAPABILITY_CONSUMED,
+                    "Capability already consumed",
+                ),
                 secretctl_capability::CapabilityError::EpochMismatch { .. } => {
                     RpcError::new(RpcErrorCode::EPOCH_INVALIDATED, "Epoch mismatch")
                 }
@@ -545,7 +565,11 @@ impl BrokerState {
                 _ => RpcError::new(RpcErrorCode::SECURITY_VIOLATION, e.to_string()),
             })?;
 
-            (claims, entry.recipe_id.clone(), entry.provider_locator.clone())
+            (
+                claims,
+                entry.recipe_id.clone(),
+                entry.provider_locator.clone(),
+            )
         };
 
         // Audit capability consumed
@@ -569,7 +593,10 @@ impl BrokerState {
         let recipe = {
             let recipes = self.recipes.read().unwrap();
             recipes.get(&recipe_id).cloned().ok_or_else(|| {
-                RpcError::new(RpcErrorCode::RECIPE_NOT_FOUND, "Bound recipe is unavailable")
+                RpcError::new(
+                    RpcErrorCode::RECIPE_NOT_FOUND,
+                    "Bound recipe is unavailable",
+                )
             })?
         };
 
@@ -583,13 +610,16 @@ impl BrokerState {
         // Retrieve secret bytes or compute TOTP based on action kind
         let fields = match claims.action {
             ActionKind::AuthenticateTotp => {
-                let seed_bytes = self
-                    .provider
-                    .get_secret(&provider_locator)
-                    .await
-                    .map_err(|_| {
-                        RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Secret provider unavailable")
-                    })?;
+                let seed_bytes =
+                    self.provider
+                        .get_secret(&provider_locator)
+                        .await
+                        .map_err(|_| {
+                            RpcError::new(
+                                RpcErrorCode::INTERNAL_ERROR,
+                                "Secret provider unavailable",
+                            )
+                        })?;
 
                 let generator = secretctl_crypto::TotpGenerator::new();
                 let (totp_code, _time_step) = generator
@@ -614,13 +644,16 @@ impl BrokerState {
                     .collect()
             }
             ActionKind::FormSensitiveFill => {
-                let secret_bytes = self
-                    .provider
-                    .get_secret(&provider_locator)
-                    .await
-                    .map_err(|_| {
-                        RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Secret provider unavailable")
-                    })?;
+                let secret_bytes =
+                    self.provider
+                        .get_secret(&provider_locator)
+                        .await
+                        .map_err(|_| {
+                            RpcError::new(
+                                RpcErrorCode::INTERNAL_ERROR,
+                                "Secret provider unavailable",
+                            )
+                        })?;
                 let role_values: Option<HashMap<String, String>> =
                     serde_json::from_slice(secret_bytes.as_bytes()).ok();
                 recipe
@@ -652,13 +685,16 @@ impl BrokerState {
                     .collect::<Result<Vec<_>, RpcError>>()?
             }
             _ => {
-                let secret_bytes = self
-                    .provider
-                    .get_secret(&provider_locator)
-                    .await
-                    .map_err(|_| {
-                        RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Secret provider unavailable")
-                    })?;
+                let secret_bytes =
+                    self.provider
+                        .get_secret(&provider_locator)
+                        .await
+                        .map_err(|_| {
+                            RpcError::new(
+                                RpcErrorCode::INTERNAL_ERROR,
+                                "Secret provider unavailable",
+                            )
+                        })?;
                 recipe
                     .fields
                     .iter()
@@ -668,7 +704,8 @@ impl BrokerState {
                         selector: field.selector.clone(),
                         optional: field.optional,
                         clear_first: field.clear_first,
-                        encrypted_value: String::from_utf8_lossy(secret_bytes.as_bytes()).to_string(),
+                        encrypted_value: String::from_utf8_lossy(secret_bytes.as_bytes())
+                            .to_string(),
                     })
                     .collect()
             }
@@ -744,9 +781,9 @@ impl BrokerState {
     ) -> Result<ExecutorResultResult, RpcError> {
         let (req_id, cap_id, cred_id, act) = {
             let mut execs = self.executions.lock().unwrap();
-            let active = execs
-                .get_mut(&params.execution_id)
-                .ok_or_else(|| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown execution ID"))?;
+            let active = execs.get_mut(&params.execution_id).ok_or_else(|| {
+                RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown execution ID")
+            })?;
 
             active.execution.state = if params.status == "completed" {
                 ExecutionState::Completed

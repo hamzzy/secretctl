@@ -1,5 +1,5 @@
 use crate::error::AuditError;
-use crate::events::{validate_audit_payload, AuditContext};
+use crate::events::{AuditContext, validate_audit_payload};
 use chrono::{DateTime, Utc};
 use secretctl_domain::{AuditEvent, EventId};
 use sha2::{Digest, Sha256};
@@ -43,8 +43,8 @@ pub fn create_audit_event(
     let actor_type = actor_type.into();
     let event_id = EventId::new();
 
-    let event_json = serde_json::to_string(context)
-        .map_err(|e| AuditError::Serialization(e.to_string()))?;
+    let event_json =
+        serde_json::to_string(context).map_err(|e| AuditError::Serialization(e.to_string()))?;
 
     validate_audit_payload(&event_json)?;
 

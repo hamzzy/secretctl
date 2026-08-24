@@ -27,7 +27,8 @@ impl BrowserLauncher {
     pub fn find_default_chrome_binary() -> PathBuf {
         #[cfg(target_os = "macos")]
         {
-            let mac_path = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+            let mac_path =
+                PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
             if mac_path.exists() {
                 return mac_path;
             }
@@ -57,7 +58,8 @@ impl BrowserLauncher {
         let profile_dir = match custom_profile_dir {
             Some(p) => p,
             None => {
-                let temp_dir = std::env::temp_dir().join(format!("secretctl_browser_{}", instance_id));
+                let temp_dir =
+                    std::env::temp_dir().join(format!("secretctl_browser_{}", instance_id));
                 std::fs::create_dir_all(&temp_dir)?;
                 temp_dir
             }
@@ -82,7 +84,10 @@ impl BrowserLauncher {
 
         let mut cmd = Command::new(&self.chrome_binary_path);
         cmd.arg(format!("--user-data-dir={}", profile_dir.display()))
-            .arg(format!("--load-extension={}", self.extension_path.display()))
+            .arg(format!(
+                "--load-extension={}",
+                self.extension_path.display()
+            ))
             .arg(format!(
                 "--disable-extensions-except={}",
                 self.extension_path.display()

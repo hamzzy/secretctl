@@ -33,7 +33,10 @@ impl ActionRequestState {
         )
     }
 
-    pub fn transition_to(&self, next: ActionRequestState) -> Result<ActionRequestState, DomainError> {
+    pub fn transition_to(
+        &self,
+        next: ActionRequestState,
+    ) -> Result<ActionRequestState, DomainError> {
         if self.is_terminal() {
             return Err(DomainError::InvalidStateTransition {
                 from: self.as_str(),
@@ -156,7 +159,10 @@ impl BrowserSessionState {
         matches!(self, Self::Terminated)
     }
 
-    pub fn transition_to(&self, next: BrowserSessionState) -> Result<BrowserSessionState, DomainError> {
+    pub fn transition_to(
+        &self,
+        next: BrowserSessionState,
+    ) -> Result<BrowserSessionState, DomainError> {
         if self.is_terminal() {
             return Err(DomainError::InvalidStateTransition {
                 from: self.as_str(),
@@ -252,9 +258,13 @@ mod tests {
     #[test]
     fn test_action_request_state_transitions() {
         let mut state = ActionRequestState::Requested;
-        state = state.transition_to(ActionRequestState::PolicyEvaluating).unwrap();
+        state = state
+            .transition_to(ActionRequestState::PolicyEvaluating)
+            .unwrap();
         state = state.transition_to(ActionRequestState::Approved).unwrap();
-        state = state.transition_to(ActionRequestState::CapabilityIssued).unwrap();
+        state = state
+            .transition_to(ActionRequestState::CapabilityIssued)
+            .unwrap();
         state = state.transition_to(ActionRequestState::Executing).unwrap();
         state = state.transition_to(ActionRequestState::Completed).unwrap();
         assert!(state.is_terminal());

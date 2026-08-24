@@ -1,170 +1,119 @@
 #!/usr/bin/env node
 
-/**
- * secretctl Model Context Protocol (MCP) Server
- * Exposes capability-based authentication tools to AI agent runtimes.
- * Never outputs secret bytes, passwords, seeds, or tokens.
- */
-
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { SecretCtl } from "@secretctl/sdk";
+import { SecretAction, SecretCtl } from "@secretctl/sdk";
+
+const principalId = process.env.SECRETCTL_PRINCIPAL_ID;
+if (!principalId) {
+  throw new Error("SECRETCTL_PRINCIPAL_ID must identify an enrolled agent");
+}
 
 const server = new Server(
-  {
-    name: "secretctl",
-    version: "0.1.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
+  { name: "secretctl", version: "0.1.0" },
+  { capabilities: { tools: {} } },
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "secretctl_authenticate_password",
-        description:
-          "Perform approved password authentication for an enrolled identity in a managed browser session without receiving the password.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            identity: {
-              type: "string",
-              description: "The name of the enrolled credential/identity (e.g. 'github-work')",
-            },
-            origin: {
-              type: "string",
-              description: "The exact destination origin (e.g. 'https://github.com:443')",
-            },
-            pathPrefix: {
-              type: "string",
-              description: "Optional URL path prefix (e.g. '/login')",
-            },
-            browserSessionId: {
-              type: "string",
-              description: "The managed browser session ID",
-            },
-            reason: {
-              type: "string",
-              description: "Attributable justification for requesting authentication",
-            },
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: "secretctl_execute",
+      description: "Request a broker-authorized secret action without receiving secret material.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          action: {
+            type: "string",
+            enum: ["authenticate.password", "authenticate.totp", "form.sensitive_fill"],
           },
-          required: ["identity", "origin", "browserSessionId", "reason"],
+          identity: { type: "string" },
+          origin: { type: "string" },
+          pathPrefix: { type: "string" },
+          browserSessionId: { type: "string" },
+          reason: { type: "string", maxLength: 500 },
         },
+        required: ["action", "identity", "origin", "browserSessionId", "reason"],
       },
-      {
-        name: "secretctl_authenticate_totp",
-        description:
-          "Generate and fill one approved RFC 6238 TOTP code for active authentication without exposing the seed or code.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            identity: {
-              type: "string",
-              description: "The name of the TOTP credential (e.g. 'github-totp')",
-            },
-            origin: {
-              type: "string",
-              description: "The exact destination origin",
-            },
-            browserSessionId: {
-              type: "string",
-              description: "The managed browser session ID",
-            },
-            reason: {
-              type: "string",
-              description: "Attributable justification",
-            },
-          },
-          required: ["identity", "origin", "browserSessionId", "reason"],
+    },
+    {
+      name: "secretctl_action_status",
+      description: "Read the redacted status of an existing action request.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { requestId: { type: "string" } },
+        required: ["requestId"],
+      },
+    },
+    {
+      name: "secretctl_cancel_action",
+      description: "Cancel an action request that has not begun secret execution.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          requestId: { type: "string" },
+          reason: { type: "string", maxLength: 500 },
         },
+        required: ["requestId"],
       },
-      {
-        name: "secretctl_fill_sensitive_form",
-        description:
-          "Fill approved sensitive form fields (e.g. recovery codes, account numbers) into configured recipe fields without exposing values.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            identity: {
-              type: "string",
-              description: "The form identity descriptor",
-            },
-            origin: {
-              type: "string",
-              description: "The exact destination origin",
-            },
-            browserSessionId: {
-              type: "string",
-              description: "The managed browser session ID",
-            },
-            reason: {
-              type: "string",
-              description: "Attributable justification",
-            },
-          },
-          required: ["identity", "origin", "browserSessionId", "reason"],
-        },
-      },
-    ],
-  };
-});
+    },
+  ],
+}));
+
+function requiredString(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Invalid ${key}`);
+  }
+  return value;
+}
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  let action: "authenticate.password" | "authenticate.totp" | "form.sensitive_fill";
-  if (name === "secretctl_authenticate_password") {
-    action = "authenticate.password";
-  } else if (name === "secretctl_authenticate_totp") {
-    action = "authenticate.totp";
-  } else if (name === "secretctl_fill_sensitive_form") {
-    action = "form.sensitive_fill";
-  } else {
-    throw new Error(`Unknown tool: ${name}`);
-  }
-
-  const client = await SecretCtl.connect();
+  const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+  const client = await SecretCtl.connect({ principalId });
   try {
-    const result = await client.execute({
-      action,
-      identity: (args as any).identity,
-      target: {
-        origin: (args as any).origin,
-        pathPrefix: (args as any).pathPrefix,
-      },
-      browserSessionId: (args as any).browserSessionId,
-      reason: (args as any).reason,
-    });
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(result, null, 2),
-        },
-      ],
-    };
+    let result: unknown;
+    switch (request.params.name) {
+      case "secretctl_execute":
+        result = await client.execute({
+          action: requiredString(args, "action") as SecretAction,
+          identity: requiredString(args, "identity"),
+          target: {
+            origin: requiredString(args, "origin"),
+            pathPrefix:
+              typeof args.pathPrefix === "string" ? args.pathPrefix : undefined,
+          },
+          browserSessionId: requiredString(args, "browserSessionId"),
+          reason: requiredString(args, "reason"),
+        });
+        break;
+      case "secretctl_action_status":
+        result = await client.status(requiredString(args, "requestId"));
+        break;
+      case "secretctl_cancel_action":
+        result = {
+          requestId: requiredString(args, "requestId"),
+          cancelled: await client.cancel(
+            requiredString(args, "requestId"),
+            typeof args.reason === "string" ? args.reason : undefined,
+          ),
+        };
+        break;
+      default:
+        throw new Error("Unknown secretctl tool");
+    }
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
   } finally {
     client.close();
   }
 });
 
-async function run() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("secretctl MCP server running on stdio");
-}
-
-run().catch((error) => {
-  console.error("Fatal MCP error:", error);
-  process.exit(1);
-});
+const transport = new StdioServerTransport();
+await server.connect(transport);
+console.error("secretctl MCP server running on stdio");

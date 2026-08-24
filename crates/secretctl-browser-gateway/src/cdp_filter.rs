@@ -1,6 +1,6 @@
 use crate::error::GatewayError;
-use serde_json::Value;
 use secretctl_crypto::contains_prohibited_key_name;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::RwLock;
 
@@ -91,7 +91,11 @@ impl CdpFilter {
         tabs.contains(&tab_id)
     }
 
-    pub fn validate_cdp_command(&self, method: &str, tab_id: Option<u32>) -> Result<(), GatewayError> {
+    pub fn validate_cdp_command(
+        &self,
+        method: &str,
+        tab_id: Option<u32>,
+    ) -> Result<(), GatewayError> {
         // 1. Check globally prohibited methods
         for &prohibited in PROHIBITED_CDP_METHODS {
             if method == prohibited
@@ -176,10 +180,15 @@ impl CdpFilter {
             Value::Object(map) => {
                 if let Some(node_name) = map.get("nodeName").and_then(|v| v.as_str()) {
                     if node_name.eq_ignore_ascii_case("INPUT") {
-                        if let Some(attrs) = map.get_mut("attributes").and_then(|v| v.as_array_mut()) {
+                        if let Some(attrs) =
+                            map.get_mut("attributes").and_then(|v| v.as_array_mut())
+                        {
                             let mut is_password = false;
                             for chunk in attrs.chunks(2) {
-                                if chunk.len() == 2 && chunk[0].as_str() == Some("type") && chunk[1].as_str() == Some("password") {
+                                if chunk.len() == 2
+                                    && chunk[0].as_str() == Some("type")
+                                    && chunk[1].as_str() == Some("password")
+                                {
                                     is_password = true;
                                     break;
                                 }
@@ -240,12 +249,32 @@ mod tests {
     #[test]
     fn test_cdp_filter_blocks_cookies() {
         let filter = CdpFilter::new();
-        assert!(filter.validate_cdp_command("Network.getAllCookies", None).is_err());
-        assert!(filter.validate_cdp_command("Storage.getCookies", None).is_err());
+        assert!(
+            filter
+                .validate_cdp_command("Network.getAllCookies", None)
+                .is_err()
+        );
+        assert!(
+            filter
+                .validate_cdp_command("Storage.getCookies", None)
+                .is_err()
+        );
         assert!(filter.validate_cdp_command("Page.navigate", None).is_ok());
-        assert!(filter.validate_cdp_command("Runtime.evaluate", None).is_err());
-        assert!(filter.validate_cdp_command("Network.getResponseBody", None).is_err());
-        assert!(filter.validate_cdp_command("MadeUp.readSecrets", None).is_err());
+        assert!(
+            filter
+                .validate_cdp_command("Runtime.evaluate", None)
+                .is_err()
+        );
+        assert!(
+            filter
+                .validate_cdp_command("Network.getResponseBody", None)
+                .is_err()
+        );
+        assert!(
+            filter
+                .validate_cdp_command("MadeUp.readSecrets", None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -254,14 +283,26 @@ mod tests {
         let tab_id = 42;
 
         // Outside sensitive window -> screenshot allowed
-        assert!(filter.validate_cdp_command("Page.captureScreenshot", Some(tab_id)).is_ok());
+        assert!(
+            filter
+                .validate_cdp_command("Page.captureScreenshot", Some(tab_id))
+                .is_ok()
+        );
 
         // Inside sensitive window -> screenshot blocked!
         filter.enter_sensitive_window(tab_id);
-        assert!(filter.validate_cdp_command("Page.captureScreenshot", Some(tab_id)).is_err());
+        assert!(
+            filter
+                .validate_cdp_command("Page.captureScreenshot", Some(tab_id))
+                .is_err()
+        );
 
         filter.exit_sensitive_window(tab_id);
-        assert!(filter.validate_cdp_command("Page.captureScreenshot", Some(tab_id)).is_ok());
+        assert!(
+            filter
+                .validate_cdp_command("Page.captureScreenshot", Some(tab_id))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -279,7 +320,11 @@ mod tests {
         });
 
         filter.sanitize_cdp_response("Network.requestWillBeSent", &mut json);
-        let auth_val = json.pointer("/params/request/headers/Authorization").unwrap().as_str().unwrap();
+        let auth_val = json
+            .pointer("/params/request/headers/Authorization")
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(auth_val, "[REDACTED_BY_SECRETCTL]");
     }
 }

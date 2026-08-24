@@ -1,9 +1,12 @@
 use clap::{Parser, Subcommand};
-use secretctl_native_host::{run_stdio_bridge, NativeHostManifest};
+use secretctl_native_host::{NativeHostManifest, run_stdio_bridge};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "secretctl-native-host", about = "Chrome Native Messaging Host for secretctl")]
+#[command(
+    name = "secretctl-native-host",
+    about = "Chrome Native Messaging Host for secretctl"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

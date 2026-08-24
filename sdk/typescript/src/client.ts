@@ -10,7 +10,7 @@ const PROHIBITED_RESPONSE_KEYS = [
   "private_key", "refresh_token", "access_token", "capability_token"
 ];
 
-function assertAgentSafe(value: unknown): void {
+export function assertAgentSafe(value: unknown): void {
   if (Array.isArray(value)) {
     value.forEach(assertAgentSafe);
     return;

@@ -2,9 +2,7 @@ use crate::error::PolicyError;
 use crate::hash::compute_policy_hash;
 use crate::model::PolicyDocument;
 use crate::risk::calculate_risk_level;
-use secretctl_domain::{
-    ActionKind, AgentId, CanonicalOrigin, PolicyDecision, PolicyEffect,
-};
+use secretctl_domain::{ActionKind, AgentId, CanonicalOrigin, PolicyDecision, PolicyEffect};
 
 pub struct PolicyEvaluator {
     document: PolicyDocument,
@@ -181,27 +179,31 @@ mod tests {
 
         // Different destination -> default deny
         let other_origin = CanonicalOrigin::parse("https://evil.com").unwrap();
-        assert!(evaluator
-            .evaluate(
-                &agent_id,
-                "github-work",
-                ActionKind::AuthenticatePassword,
-                &other_origin,
-                None,
-                "managed",
-            )
-            .is_err());
+        assert!(
+            evaluator
+                .evaluate(
+                    &agent_id,
+                    "github-work",
+                    ActionKind::AuthenticatePassword,
+                    &other_origin,
+                    None,
+                    "managed",
+                )
+                .is_err()
+        );
 
         // Omitting a path must never broaden a path-constrained rule.
-        assert!(evaluator
-            .evaluate(
-                &agent_id,
-                "github-work",
-                ActionKind::AuthenticatePassword,
-                &origin,
-                None,
-                "managed",
-            )
-            .is_err());
+        assert!(
+            evaluator
+                .evaluate(
+                    &agent_id,
+                    "github-work",
+                    ActionKind::AuthenticatePassword,
+                    &origin,
+                    None,
+                    "managed",
+                )
+                .is_err()
+        );
     }
 }

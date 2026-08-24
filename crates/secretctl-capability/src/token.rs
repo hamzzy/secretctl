@@ -1,8 +1,8 @@
 use crate::error::CapabilityError;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
-use secretctl_crypto::{sha256_digest, verify_signature, KeyPair};
+use secretctl_crypto::{KeyPair, sha256_digest, verify_signature};
 use secretctl_domain::{
     ActionKind, AgentId, BrowserSessionId, CanonicalOrigin, Capability, CapabilityId,
     CapabilityState, CredentialId, RecipeId, RequestId,
@@ -130,7 +130,9 @@ pub fn parse_and_verify_token(
 ) -> Result<CapabilityClaims, CapabilityError> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 2 {
-        return Err(CapabilityError::Serialization("Malformed token format".to_string()));
+        return Err(CapabilityError::Serialization(
+            "Malformed token format".to_string(),
+        ));
     }
 
     let claims_b64 = parts[0];

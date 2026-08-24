@@ -2,6 +2,7 @@
   "name": "@secretctl/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for secretctl credential isolation for AI agents",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -10,5 +11,9 @@
   },
   "keywords": ["secretctl", "credentials", "security", "ai-agents", "mcp"],
   "author": "secretctl contributors",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
 }

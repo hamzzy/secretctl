@@ -22,7 +22,10 @@ impl Decoder for ChromeNativeMessagingCodec {
         if length > MAX_CHROME_MSG_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Message length {} exceeds max {}", length, MAX_CHROME_MSG_BYTES),
+                format!(
+                    "Message length {} exceeds max {}",
+                    length, MAX_CHROME_MSG_BYTES
+                ),
             ));
         }
 
@@ -44,7 +47,11 @@ impl Encoder<Vec<u8>> for ChromeNativeMessagingCodec {
         if item.len() > MAX_CHROME_MSG_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Message length {} exceeds max {}", item.len(), MAX_CHROME_MSG_BYTES),
+                format!(
+                    "Message length {} exceeds max {}",
+                    item.len(),
+                    MAX_CHROME_MSG_BYTES
+                ),
             ));
         }
 

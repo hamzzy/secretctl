@@ -8,6 +8,6 @@ pub use agent::*;
 pub use error::{ProtocolError, RpcError, RpcErrorCode};
 pub use executor::*;
 pub use framing::{
-    LengthPrefixedCodec, DEFAULT_MAX_AGENT_PAYLOAD_BYTES, DEFAULT_MAX_EXECUTOR_PAYLOAD_BYTES,
+    DEFAULT_MAX_AGENT_PAYLOAD_BYTES, DEFAULT_MAX_EXECUTOR_PAYLOAD_BYTES, LengthPrefixedCodec,
 };
 pub use jsonrpc::{RpcId, RpcNotification, RpcRequest, RpcResponse};

@@ -1,10 +1,14 @@
 import asyncio
+import os
 from secretctl import AsyncSecretCtl, ExecuteRequest, Target
 
 
 async def main():
     print("Connecting Python AI agent to secretctl broker...")
-    client = await AsyncSecretCtl.connect()
+    principal_id = os.environ.get("SECRETCTL_PRINCIPAL_ID")
+    if not principal_id:
+        raise RuntimeError("SECRETCTL_PRINCIPAL_ID is required")
+    client = await AsyncSecretCtl.connect(principal_id)
 
     print("Requesting TOTP entry for 'github-totp'...")
     result = await client.execute(

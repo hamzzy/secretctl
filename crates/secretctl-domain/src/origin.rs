@@ -69,7 +69,11 @@ impl fmt::Display for CanonicalOrigin {
 
 impl fmt::Debug for CanonicalOrigin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CanonicalOrigin({}://{}:{})", self.scheme, self.host, self.port)
+        write!(
+            f,
+            "CanonicalOrigin({}://{}:{})",
+            self.scheme, self.host, self.port
+        )
     }
 }
 

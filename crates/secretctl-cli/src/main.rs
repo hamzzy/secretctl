@@ -1,5 +1,7 @@
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
+use rand::RngCore;
+use secretctl_audit::verify_audit_chain;
 use secretctl_crypto::KeyPair;
 use secretctl_domain::{
     ActionKind, AgentId, AgentPrincipal, CanonicalOrigin, CredentialDescriptor, CredentialId,
@@ -8,12 +10,14 @@ use secretctl_policy::PolicyDocument;
 use secretctl_provider_macos::MacOsKeychainProvider;
 use secretctl_providers::SecretProvider;
 use secretctl_store::SqliteStore;
-use secretctl_audit::verify_audit_chain;
 use std::path::PathBuf;
-use rand::RngCore;
 
 #[derive(Parser, Debug)]
-#[command(name = "secretctl", version, about = "Local-first credential isolation for AI agents")]
+#[command(
+    name = "secretctl",
+    version,
+    about = "Local-first credential isolation for AI agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -139,7 +143,6 @@ enum AuditCommands {
     Verify,
 }
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -190,7 +193,10 @@ async fn main() -> anyhow::Result<()> {
                         created_at: Utc::now(),
                     };
                     store.insert_agent(&agent)?;
-                    println!("Successfully enrolled agent '{}' with ID: {}", name, agent.agent_id);
+                    println!(
+                        "Successfully enrolled agent '{}' with ID: {}",
+                        name, agent.agent_id
+                    );
                 }
                 AgentCommands::List => {
                     println!("Listing enrolled agents (from {:?})", db_path);
@@ -244,7 +250,10 @@ async fn main() -> anyhow::Result<()> {
                         let _ = provider.delete_secret(&provider_locator).await;
                         return Err(error.into());
                     }
-                    println!("Successfully stored credential '{}' in macOS Keychain", name);
+                    println!(
+                        "Successfully stored credential '{}' in macOS Keychain",
+                        name
+                    );
                 }
                 CredentialCommands::Check { name } => {
                     let exists = provider.exists(&name).await?;
@@ -275,7 +284,12 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     PolicyDocument::from_yaml(&content)?
                 };
-                println!("Policy {:?} is valid (version {}, {} rules).", path, doc.version, doc.rules.len());
+                println!(
+                    "Policy {:?} is valid (version {}, {} rules).",
+                    path,
+                    doc.version,
+                    doc.rules.len()
+                );
             }
         },
         Commands::Audit { cmd } => match cmd {

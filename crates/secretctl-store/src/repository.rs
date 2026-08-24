@@ -1,7 +1,9 @@
 use crate::error::StoreError;
 use crate::migrations::apply_migrations;
-use rusqlite::{params, Connection};
-use secretctl_domain::{ActionKind, AgentPrincipal, AuditEvent, CredentialDescriptor, CredentialId, EventId};
+use rusqlite::{Connection, params};
+use secretctl_domain::{
+    ActionKind, AgentPrincipal, AuditEvent, CredentialDescriptor, CredentialId, EventId,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -100,10 +102,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn get_credential_by_name(
-        &self,
-        name: &str,
-    ) -> Result<CredentialDescriptor, StoreError> {
+    pub fn get_credential_by_name(&self, name: &str) -> Result<CredentialDescriptor, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT credential_id, name, kind, provider, provider_locator,
@@ -115,20 +114,24 @@ impl SqliteStore {
                 let allowed_actions_json: String = row.get(5)?;
                 let disabled_at: Option<String> = row.get(7)?;
                 let allowed_actions: Vec<ActionKind> = serde_json::from_str(&allowed_actions_json)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        5,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    ))?;
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
                 let disabled_at = disabled_at
                     .map(|value| {
                         chrono::DateTime::parse_from_rfc3339(&value)
                             .map(|parsed| parsed.with_timezone(&chrono::Utc))
-                            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                                7,
-                                rusqlite::types::Type::Text,
-                                Box::new(e),
-                            ))
+                            .map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    7,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })
                     })
                     .transpose()?;
                 Ok(CredentialDescriptor {
@@ -182,14 +185,17 @@ impl SqliteStore {
                 event_hash: row.get(7)?,
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
                     .map(|parsed| parsed.with_timezone(&chrono::Utc))
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        8,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    ))?,
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            8,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn get_latest_audit_hash(&self) -> Result<Vec<u8>, StoreError> {
@@ -219,7 +225,7 @@ impl SqliteStore {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use secretctl_audit::{create_audit_event, AuditContext, GENESIS_PREVIOUS_HASH};
+    use secretctl_audit::{AuditContext, GENESIS_PREVIOUS_HASH, create_audit_event};
     use secretctl_domain::AgentId;
 
     #[test]

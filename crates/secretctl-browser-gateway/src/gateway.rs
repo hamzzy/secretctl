@@ -19,7 +19,11 @@ impl BrowserGateway {
         }
     }
 
-    pub fn process_cdp_command(&self, method: &str, tab_id: Option<u32>) -> Result<(), GatewayError> {
+    pub fn process_cdp_command(
+        &self,
+        method: &str,
+        tab_id: Option<u32>,
+    ) -> Result<(), GatewayError> {
         self.filter.validate_cdp_command(method, tab_id)
     }
 

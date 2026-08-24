@@ -30,7 +30,10 @@ impl SecretProvider for MemorySecretProvider {
     }
 
     async fn get_secret(&self, locator: &str) -> Result<SecretBytes, ProviderError> {
-        let store = self.store.read().map_err(|_| ProviderError::Internal("Lock poisoned".to_string()))?;
+        let store = self
+            .store
+            .read()
+            .map_err(|_| ProviderError::Internal("Lock poisoned".to_string()))?;
         let bytes = store
             .get(locator)
             .cloned()
@@ -39,19 +42,28 @@ impl SecretProvider for MemorySecretProvider {
     }
 
     async fn store_secret(&self, locator: &str, secret: &[u8]) -> Result<(), ProviderError> {
-        let mut store = self.store.write().map_err(|_| ProviderError::Internal("Lock poisoned".to_string()))?;
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| ProviderError::Internal("Lock poisoned".to_string()))?;
         store.insert(locator.to_string(), secret.to_vec());
         Ok(())
     }
 
     async fn delete_secret(&self, locator: &str) -> Result<(), ProviderError> {
-        let mut store = self.store.write().map_err(|_| ProviderError::Internal("Lock poisoned".to_string()))?;
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| ProviderError::Internal("Lock poisoned".to_string()))?;
         store.remove(locator);
         Ok(())
     }
 
     async fn exists(&self, locator: &str) -> Result<bool, ProviderError> {
-        let store = self.store.read().map_err(|_| ProviderError::Internal("Lock poisoned".to_string()))?;
+        let store = self
+            .store
+            .read()
+            .map_err(|_| ProviderError::Internal("Lock poisoned".to_string()))?;
         Ok(store.contains_key(locator))
     }
 }
@@ -67,7 +79,10 @@ mod tests {
 
         assert!(!provider.exists(locator).await.unwrap());
 
-        provider.store_secret(locator, b"my_super_secret").await.unwrap();
+        provider
+            .store_secret(locator, b"my_super_secret")
+            .await
+            .unwrap();
         assert!(provider.exists(locator).await.unwrap());
 
         let secret = provider.get_secret(locator).await.unwrap();

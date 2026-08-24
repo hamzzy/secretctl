@@ -3,5 +3,5 @@ pub mod token;
 pub mod verifier;
 
 pub use error::CapabilityError;
-pub use token::{mint_capability, parse_and_verify_token, CapabilityClaims};
-pub use verifier::{verify_and_consume_capability, ExecutionContextSnapshot};
+pub use token::{CapabilityClaims, mint_capability, parse_and_verify_token};
+pub use verifier::{ExecutionContextSnapshot, verify_and_consume_capability};

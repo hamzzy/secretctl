@@ -16,11 +16,9 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<(), StoreError> {
     )?;
 
     let current_version: Option<i32> = tx
-        .query_row(
-            "SELECT MAX(version) FROM schema_migrations",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
         .ok()
         .flatten();
 
