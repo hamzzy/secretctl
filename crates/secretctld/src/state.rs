@@ -1,5 +1,7 @@
 use crate::dom_view::{PageProjection, ResolveError, ViewLimits};
+use base64::Engine as _;
 use chrono::Utc;
+use rand::RngCore as _;
 use secretctl_audit::{AuditContext, create_audit_event};
 use secretctl_browser_gateway::{BrowserLauncher, CdpFilter, CdpPipe, LaunchedBrowser};
 use secretctl_capability::{
@@ -35,6 +37,9 @@ use zeroize::Zeroize;
 pub struct ActiveBrowserSession {
     pub session: BrowserSession,
     pub active_tab_count: u32,
+    /// Present for production registrations. Direct in-process fixtures leave
+    /// this absent because they do not cross the native-host seam.
+    pub session_proof_hash: Option<[u8; 32]>,
 }
 
 pub struct CapabilityEntry {
@@ -364,6 +369,7 @@ impl BrokerState {
             ActiveBrowserSession {
                 session,
                 active_tab_count: 1,
+                session_proof_hash: None,
             },
         );
     }
@@ -2282,7 +2288,11 @@ impl BrokerState {
         }
 
         let session_id = BrowserSessionId::new();
-        self.register_browser_session(BrowserSession {
+        let mut proof_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut proof_bytes);
+        let session_proof =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(proof_bytes);
+        let session = BrowserSession {
             session_id: session_id.clone(),
             instance_id: params.instance_id,
             extension_key_id: params.extension_key_id,
@@ -2290,7 +2300,17 @@ impl BrokerState {
             assurance: "managed".to_string(),
             state: BrowserSessionState::Active,
             last_heartbeat_at: Utc::now(),
-        });
+        };
+        self.sessions.write().unwrap().insert(
+            session_id.clone(),
+            ActiveBrowserSession {
+                session,
+                active_tab_count: 1,
+                session_proof_hash: Some(secretctl_crypto::sha256_digest(
+                    session_proof.as_bytes(),
+                )),
+            },
+        );
         self.record_audit_event(
             "browser.registered",
             "executor",
@@ -2311,6 +2331,7 @@ impl BrokerState {
             browser_session_id: session_id,
             assurance: "managed".to_string(),
             heartbeat_interval_seconds: 5,
+            session_proof,
         })
     }
 
@@ -2688,14 +2709,20 @@ impl BrokerState {
         let pub_key = self.broker_key.public_key_bytes();
         let extension_key_id = {
             let sessions = self.sessions.read().unwrap();
-            sessions
+            let active = sessions
                 .get(&params.current_context.browser_session_id)
                 .ok_or_else(|| {
                     RpcError::new(RpcErrorCode::SESSION_TERMINATED, "Unknown browser session")
-                })?
-                .session
-                .extension_key_id
-                .clone()
+                })?;
+            if active.session_proof_hash.is_some_and(|expected| {
+                secretctl_crypto::sha256_digest(params.session_signature.as_bytes()) != expected
+            }) {
+                return Err(RpcError::new(
+                    RpcErrorCode::SECURITY_VIOLATION,
+                    "Executor session proof rejected",
+                ));
+            }
+            active.session.extension_key_id.clone()
         };
 
         let context_snapshot = ExecutionContextSnapshot {

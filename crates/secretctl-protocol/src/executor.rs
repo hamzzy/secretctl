@@ -53,6 +53,9 @@ pub struct BrowserRegisterResult {
     pub browser_session_id: BrowserSessionId,
     pub assurance: String,
     pub heartbeat_interval_seconds: u64,
+    /// Per-native-session proof. The native host retains this value and
+    /// injects it into executor.consume; it is never forwarded to page code.
+    pub session_proof: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

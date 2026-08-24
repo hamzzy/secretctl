@@ -115,6 +115,7 @@ pub async fn run_stdio_bridge(
 
     let mut chrome_source = Framed::new(stdin(), ChromeNativeMessagingCodec);
     let mut chrome_sink = Framed::new(stdout(), ChromeNativeMessagingCodec);
+    let mut executor_session_proof: Option<String> = None;
     while let Some(frame) = chrome_source.next().await {
         let frame = frame?;
         let mut request: RpcRequest<serde_json::Value> =
@@ -143,6 +144,19 @@ pub async fn run_stdio_bridge(
                 "profile_id".to_string(),
                 serde_json::Value::String(profile_id),
             );
+        } else if request.method == "executor.consume" {
+            let params = request
+                .params
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| anyhow::anyhow!("executor.consume parameters missing"))?;
+            let proof = executor_session_proof
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("browser session is not registered"))?;
+            params.insert(
+                "session_signature".to_string(),
+                serde_json::Value::String(proof.clone()),
+            );
         }
         let request_bytes = serde_json::to_vec(&request)?;
         socket.send(channel.encrypt(&request_bytes)?).await?;
@@ -159,6 +173,13 @@ pub async fn run_stdio_bridge(
                 .as_mut()
                 .and_then(serde_json::Value::as_object_mut)
             {
+                executor_session_proof = result
+                    .remove("session_proof")
+                    .and_then(|value| value.as_str().map(str::to_string));
+                anyhow::ensure!(
+                    executor_session_proof.is_some(),
+                    "browser registration omitted executor session proof"
+                );
                 result.insert(
                     "session_material".to_string(),
                     serde_json::Value::String(
