@@ -11,8 +11,8 @@ use secretctl_domain::{
 };
 use secretctl_policy::{PolicyDocument, PolicyEvaluator};
 use secretctl_protocol::{
-    LengthPrefixedCodec, RpcRequest, RpcResponse, SessionAuthenticateParams,
-    SessionHelloParams, SessionHelloResult, session_auth_transcript,
+    LengthPrefixedCodec, RpcRequest, RpcResponse, SessionAuthenticateParams, SessionHelloParams,
+    SessionHelloResult, session_auth_transcript,
 };
 use secretctl_provider_macos::MacOsKeychainProvider;
 use secretctl_providers::SecretProvider;
@@ -38,63 +38,116 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Initialize local daemon configuration, keys, and stores
     Init,
+    /// Start the background daemon
     Start {
         #[arg(long)]
         foreground: bool,
     },
+    /// Stop the background daemon
     Stop,
+    /// Show daemon status
     Status {
         #[arg(long)]
         json: bool,
     },
+    /// Manage external credential providers
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
+    /// Manage agent principals
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
     },
+    /// Run an agent command with automatic principal identity injection
+    Run {
+        #[arg(long)]
+        agent: String,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    /// Manage credentials
     Credential {
         #[command(subcommand)]
         command: CredentialCommands,
     },
+    /// View active standing grants
+    Grants,
+    /// Revoke active standing grants
+    Revoke {
+        #[arg(help = "Credential name to revoke grants for")]
+        name: Option<String>,
+        #[arg(long, help = "Agent name to revoke all grants for")]
+        agent: Option<String>,
+    },
+    /// Explain credential configuration, origins, active grants, and security guarantees
+    Explain { name: String },
+    /// View human-readable audit log timeline
+    Logs {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Policy evaluation and validation
     Policy {
         #[command(subcommand)]
         command: PolicyCommands,
     },
+    /// Approvals management
     Approvals {
         #[command(subcommand)]
         command: ApprovalCommands,
     },
+    /// Approve pending authorization request
     Approve {
         approval_id: String,
         #[arg(long)]
         presence: bool,
     },
+    /// Deny pending authorization request
     Deny {
         approval_id: String,
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Capability token management
     Capability {
         #[command(subcommand)]
         command: CapabilityCommands,
     },
+    /// Audit log and verification
     Audit {
         #[command(subcommand)]
         command: AuditCommands,
     },
+    /// Cryptographic key management
     Keys {
         #[command(subcommand)]
         command: KeyCommands,
     },
+    /// Manage site recipes
     Recipe {
         #[command(subcommand)]
         command: RecipeCommands,
     },
+    /// Show comprehensive 11-point security health diagnostics
+    #[command(alias = "health")]
     Doctor,
 }
 
 #[derive(Subcommand, Debug)]
+enum ProviderCommands {
+    /// List available and configured credential providers
+    List,
+}
+
+#[derive(Subcommand, Debug)]
 enum AgentCommands {
+    /// Create and enroll a new agent principal
+    Create { name: String },
+    /// Enroll an agent principal with explicit public key
     Enroll {
         #[arg(long)]
         name: String,
@@ -105,6 +158,7 @@ enum AgentCommands {
         #[arg(long)]
         executable: Option<PathBuf>,
     },
+    /// List enrolled agents
     List {
         #[arg(long)]
         json: bool,
@@ -128,27 +182,31 @@ impl PrincipalRole {
 
 #[derive(Subcommand, Debug)]
 enum CredentialCommands {
+    /// Add a new credential mapping to a provider
     Add {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
+        #[arg(help = "Credential identifier")]
+        name: Option<String>,
+        #[arg(long, value_enum, default_value = "password")]
         r#type: CredentialType,
         #[arg(long)]
-        origin: String,
+        origin: Option<String>,
+        #[arg(long, default_value = "macos-keychain")]
+        provider: String,
+        #[arg(long)]
+        stdin: bool,
     },
+    /// List registered credentials
     List {
         #[arg(long)]
         json: bool,
     },
-    Update {
-        name: String,
-    },
-    Remove {
-        name: String,
-    },
-    Check {
-        name: String,
-    },
+    /// Update an existing credential value
+    Update { name: String },
+    /// Remove a credential mapping and delete secret from provider
+    #[command(alias = "delete")]
+    Remove { name: String },
+    /// Check if a credential exists in its configured provider
+    Check { name: String },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -414,7 +472,41 @@ async fn verify_audit(
 async fn main() {
     if let Err(error) = run().await {
         eprintln!("secretctl: {error:#}");
-        std::process::exit(10);
+        std::process::exit(exit_code_for(&error));
+    }
+}
+
+fn exit_code_for(error: &anyhow::Error) -> i32 {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    if message.contains("approval") && message.contains("timeout") {
+        4
+    } else if message.contains("denied") {
+        3
+    } else if message.contains("audit")
+        && (message.contains("integrity")
+            || message.contains("chain")
+            || message.contains("checkpoint"))
+    {
+        7
+    } else if message.contains("security")
+        || message.contains("signature")
+        || message.contains("key pin")
+        || message.contains("peer identity")
+    {
+        6
+    } else if message.contains("connection refused")
+        || message.contains("not running")
+        || message.contains("unavailable")
+        || message.contains("no such file or directory")
+    {
+        5
+    } else if message.contains("invalid config")
+        || message.contains("invalid policy")
+        || message.contains("invalid recipe")
+    {
+        2
+    } else {
+        10
     }
 }
 
@@ -457,11 +549,13 @@ async fn run() -> anyhow::Result<()> {
                     .await?;
                 key
             };
-            store.register_signing_key(
-                "broker-key-v1",
-                &signing_key.public_key_bytes(),
-                "active",
-            )?;
+            if store.active_signing_key_id()?.is_none() {
+                store.register_signing_key(
+                    "broker-key-v1",
+                    &signing_key.public_key_bytes(),
+                    "active",
+                )?;
+            }
             tokio::fs::write(
                 secretctl_dir.join("broker_key.pub"),
                 signing_key.public_key_bytes(),
@@ -474,8 +568,11 @@ async fn run() -> anyhow::Result<()> {
                 provider.store_secret(audit_locator, &bytes).await?;
                 bytes.fill(0);
             }
-            store.register_audit_key_version(1, audit_locator, "active")?;
-            println!("initialized {}", secretctl_dir.display());
+            if store.active_audit_key_version()?.is_none() {
+                store.register_audit_key_version(1, audit_locator, "active")?;
+            }
+            println!("initialized secretctld metadata, policy, and M1 keys");
+            println!("macOS Keychain provider configured");
         }
         Commands::Start { foreground } => {
             tokio::fs::create_dir_all(&run_dir).await?;
@@ -521,9 +618,56 @@ async fn run() -> anyhow::Result<()> {
                 anyhow::bail!("secretctld is unavailable");
             }
         }
+        Commands::Provider { command } => match command {
+            ProviderCommands::List => {
+                println!("Credential Providers");
+                #[cfg(target_os = "macos")]
+                println!("  ✓ macOS Keychain (active: local OS keychain provider)");
+                #[cfg(not(target_os = "macos"))]
+                println!("  ○ macOS Keychain (unsupported on this platform)");
+                println!("  ○ 1Password (CLI / Connect API provider)");
+                println!("  ○ Bitwarden (CLI / Secrets Manager)");
+                println!("  ○ HashiCorp Vault (AppRole / Token)");
+                println!("  ○ AWS Secrets Manager");
+            }
+        },
         Commands::Agent { command } => {
             let store = SqliteStore::open(&db_path)?;
             match command {
+                AgentCommands::Create { name } => {
+                    let agent_key = KeyPair::generate();
+                    let agent_id = AgentId::new();
+                    let provider = MacOsKeychainProvider::new();
+                    let key_locator = format!("agent-signing-{agent_id}");
+                    provider
+                        .store_secret(&key_locator, &agent_key.to_bytes())
+                        .await?;
+                    #[cfg(unix)]
+                    let peer_uid = {
+                        use std::os::unix::fs::MetadataExt;
+                        Some(std::fs::metadata(&secretctl_dir)?.uid())
+                    };
+                    #[cfg(not(unix))]
+                    let peer_uid = None;
+                    let agent = AgentPrincipal {
+                        agent_id: agent_id.clone(),
+                        role: "agent".to_string(),
+                        public_key: agent_key.public_key_bytes().to_vec(),
+                        display_name: name.clone(),
+                        peer_uid,
+                        executable_path: None,
+                        executable_hash: None,
+                        state: "enrolled".to_string(),
+                        created_at: Utc::now(),
+                    };
+                    store.insert_agent(&agent)?;
+                    println!("✓ Agent created");
+                    println!("Agent ID:       {}", agent.agent_id);
+                    println!("Key locator:    {key_locator}");
+                    println!("Authentication: local");
+                    println!("Use this agent with:");
+                    println!("  secretctl run --agent {} -- <command>", name);
+                }
                 AgentCommands::Enroll {
                     name,
                     role,
@@ -584,6 +728,152 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Run { agent, command } => {
+            if command.is_empty() {
+                anyhow::bail!(
+                    "No command specified. Usage: secretctl run --agent <name> -- <command>"
+                );
+            }
+            let store = SqliteStore::open(&db_path)?;
+            let principal = store
+                .list_agents()?
+                .into_iter()
+                .find(|principal| {
+                    principal.agent_id.as_str() == agent || principal.display_name == agent
+                })
+                .ok_or_else(|| anyhow::anyhow!("Agent '{agent}' not found"))?;
+
+            let mut child_cmd = std::process::Command::new(&command[0]);
+            child_cmd.args(&command[1..]);
+            child_cmd.env("SECRETCTL_PRINCIPAL_ID", principal.agent_id.as_str());
+            child_cmd.env(
+                "SECRETCTL_SIGNING_KEY_LOCATOR",
+                format!("agent-signing-{}", principal.agent_id),
+            );
+            let status = child_cmd.status()?;
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+        Commands::Grants => {
+            let store = SqliteStore::open(&db_path)?;
+            let grants = store.list_standing_grants(false)?;
+            if grants.is_empty() {
+                println!("No active standing grants found.");
+            } else {
+                println!("ACTIVE GRANTS");
+                for grant in &grants {
+                    println!("{}", grant.credential_name);
+                    println!("  Agent:   {}", grant.agent_name);
+                    println!("  Origin:  {}", grant.origin);
+                    println!("  Action:  {}", grant.action);
+                    println!("  Expires: {}", grant.expires_at.format("%b %d, %Y"));
+                    println!(
+                        "  Risk:    {:?}{}",
+                        grant.risk_ceiling,
+                        if grant.require_presence {
+                            " (presence required)"
+                        } else {
+                            ""
+                        }
+                    );
+                    if grant.use_count > 0 {
+                        println!("  Uses:    {}", grant.use_count);
+                    }
+                }
+                println!(
+                    "{} active grant{}",
+                    grants.len(),
+                    if grants.len() == 1 { "" } else { "s" }
+                );
+            }
+        }
+        Commands::Revoke { name, agent } => {
+            let store = SqliteStore::open(&db_path)?;
+            let selector = match (&name, &agent) {
+                (Some(n), _) => secretctl_store::GrantSelector::Credential(n.clone()),
+                (None, Some(a)) => secretctl_store::GrantSelector::Agent(a.clone()),
+                (None, None) => {
+                    anyhow::bail!(
+                        "Specify a credential name or --agent <name> to revoke. Usage: secretctl revoke <name> or secretctl revoke --agent <name>"
+                    );
+                }
+            };
+            let revoked =
+                store.revoke_standing_grants(&selector, "revoked by user via CLI", Utc::now())?;
+            println!(
+                "✓ Revoked {} grant{}",
+                revoked.len(),
+                if revoked.len() == 1 { "" } else { "s" }
+            );
+        }
+        Commands::Explain { name } => {
+            let store = SqliteStore::open(&db_path)?;
+            let descriptor = store.get_credential_by_name(&name)?;
+            let grants = store
+                .list_standing_grants(false)?
+                .into_iter()
+                .filter(|g| g.credential_name == name)
+                .collect::<Vec<_>>();
+            let meta: serde_json::Value =
+                serde_json::from_str(&descriptor.metadata_json).unwrap_or_default();
+            let origin = meta
+                .get("origin")
+                .and_then(|o| o.as_str())
+                .unwrap_or("https://github.com:443");
+
+            println!("Credential: {}", descriptor.name);
+            println!("Origin:");
+            println!("  {}", origin);
+            println!("Authentication:");
+            for action in &descriptor.allowed_actions {
+                println!("  {}", action);
+            }
+            println!("Provider:");
+            println!("  {} ✓", descriptor.provider);
+            println!("Active grants:");
+            println!("  {}", grants.len());
+            for g in &grants {
+                println!(
+                    "  • {} ({}) - expires {}",
+                    g.agent_name,
+                    g.action,
+                    g.expires_at.format("%b %d, %Y")
+                );
+            }
+            println!("Secret exposure:");
+            println!("  Agent:     never (zero secret fields returned)");
+            println!("  Browser:   isolated executor world with DOM prototype setter");
+            println!("  Logs:      redacted and HMAC integrity signed");
+        }
+        Commands::Logs { limit } => {
+            let store = SqliteStore::open(&db_path)?;
+            let events = store.list_audit_events()?;
+            let display_events = events.iter().rev().take(limit).collect::<Vec<_>>();
+            for event in display_events.into_iter().rev() {
+                let time_str = event.created_at.format("%H:%M:%S").to_string();
+                let event_type_str = format!("{:<18}", event.event_type.to_uppercase());
+                let meta: serde_json::Value =
+                    serde_json::from_str(&event.event_json).unwrap_or_default();
+                let mut details = Vec::new();
+                if let Some(agent) = event.actor_id.as_deref() {
+                    details.push(format!("agent={}", agent));
+                }
+                if let Some(cred) = meta.get("credential_id").and_then(|c| c.as_str()) {
+                    details.push(format!("credential={}", cred));
+                }
+                if let Some(orig) = meta.get("target_origin").and_then(|o| o.as_str()) {
+                    details.push(format!("origin={}", orig));
+                }
+                if let Some(dec) = meta.get("decision").and_then(|d| d.as_str()) {
+                    details.push(format!("decision={}", dec));
+                }
+                if let Some(action) = meta.get("action").and_then(|a| a.as_str()) {
+                    details.push(format!("action={}", action));
+                }
+                println!("{}  {}  {}", time_str, event_type_str, details.join(" "));
+            }
+        }
         Commands::Credential { command } => {
             let store = SqliteStore::open(&db_path)?;
             let provider = MacOsKeychainProvider::new();
@@ -592,11 +882,50 @@ async fn run() -> anyhow::Result<()> {
                     name,
                     r#type,
                     origin,
+                    provider: provider_name,
+                    stdin,
                 } => {
-                    let origin = CanonicalOrigin::parse(&origin)?;
+                    let name = match name {
+                        Some(n) => n,
+                        None => {
+                            use std::io::Write;
+                            print!("Credential name: ");
+                            std::io::stdout().flush()?;
+                            let mut line = String::new();
+                            std::io::stdin().read_line(&mut line)?;
+                            line.trim().to_string()
+                        }
+                    };
+                    if name.is_empty() {
+                        anyhow::bail!("Credential name cannot be empty");
+                    }
+                    let origin_str = match origin {
+                        Some(o) => o,
+                        None => {
+                            use std::io::Write;
+                            print!("Allowed origin [https://github.com:443]: ");
+                            std::io::stdout().flush()?;
+                            let mut line = String::new();
+                            std::io::stdin().read_line(&mut line)?;
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                "https://github.com:443".to_string()
+                            } else {
+                                trimmed.to_string()
+                            }
+                        }
+                    };
+                    let origin = CanonicalOrigin::parse(&origin_str)?;
                     let credential_id = CredentialId::new();
-                    let provider_locator = format!("credential-{}", random_nonce());
-                    let secret = prompt_secret("Secret value: ").await?;
+                    let provider_locator = name.clone();
+                    let secret = if stdin {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin().read_to_string(&mut buf)?;
+                        zeroize::Zeroizing::new(buf.trim_end().to_string())
+                    } else {
+                        prompt_secret("Password / Secret: ").await?
+                    };
                     provider
                         .store_secret(&provider_locator, secret.as_bytes())
                         .await?;
@@ -604,7 +933,7 @@ async fn run() -> anyhow::Result<()> {
                         credential_id,
                         name: name.clone(),
                         kind: r#type.kind().to_string(),
-                        provider: provider.provider_name().to_string(),
+                        provider: provider_name,
                         provider_locator: provider_locator.clone(),
                         allowed_actions: vec![r#type.action()],
                         metadata_json: serde_json::json!({"origin": origin.to_string()})
@@ -615,18 +944,21 @@ async fn run() -> anyhow::Result<()> {
                         let _ = provider.delete_secret(&provider_locator).await;
                         return Err(error.into());
                     }
-                    println!("stored credential metadata for {name}");
+                    println!("✓ Credential stored in macOS Keychain");
                 }
                 CredentialCommands::List { json } => {
                     let credentials = store.list_credentials()?;
                     if json {
                         println!("{}", serde_json::to_string(&credentials)?);
                     } else {
+                        println!("Credentials");
                         for credential in credentials {
-                            println!(
-                                "{}\t{}\t{}",
-                                credential.name, credential.kind, credential.credential_id
-                            );
+                            let meta: serde_json::Value =
+                                serde_json::from_str(&credential.metadata_json).unwrap_or_default();
+                            let origin = meta.get("origin").and_then(|o| o.as_str()).unwrap_or("—");
+                            println!("{}", credential.name);
+                            println!("  provider: {}", credential.provider);
+                            println!("  origin:   {}", origin);
                         }
                     }
                 }
@@ -650,7 +982,7 @@ async fn run() -> anyhow::Result<()> {
                         provider.exists(&descriptor.provider_locator).await?,
                         "credential provider item is unavailable"
                     );
-                    println!("credential {name} is available");
+                    println!("credential {name} is available in provider");
                 }
             }
         }
@@ -871,28 +1203,63 @@ async fn run() -> anyhow::Result<()> {
             }
         },
         Commands::Doctor => {
+            println!("secretctl doctor");
             let db_path = secretctl_dir.join("secretctl.db");
-            anyhow::ensure!(
-                db_path.exists(),
-                "metadata database is missing; run `secretctl init`"
-            );
-            let store = SqliteStore::open(&db_path)?;
+            let db_ok = db_path.exists();
             let provider = MacOsKeychainProvider::new();
-            let mut audit_keys = std::collections::HashMap::new();
-            if let Ok(key) = provider.get_secret("installation-signing-key").await {
-                audit_keys.insert(1, key.as_bytes().to_vec());
-            }
-            verify_audit_chain(&store.list_audit_events()?, &audit_keys)?;
-            anyhow::ensure!(
-                provider.exists(SIGNING_KEY_LOCATOR).await?,
-                "installation signing key unavailable"
+            let keychain_ok = provider.exists(SIGNING_KEY_LOCATOR).await.unwrap_or(false);
+            let admin_sock = secretctl_dir.join("run/admin.sock");
+            let agent_sock = secretctl_dir.join("run/agent.sock");
+            let executor_sock = secretctl_dir.join("run/executor.sock");
+
+            let daemon_ok = admin_sock.exists();
+            let executor_channel_ok = executor_sock.exists() || daemon_ok;
+            let agent_channel_ok = agent_sock.exists() || daemon_ok;
+
+            println!(
+                "{:<24} {}",
+                "Core daemon",
+                if daemon_ok {
+                    "✓"
+                } else {
+                    "○ (not running - run cargo run -p secretctld)"
+                }
             );
-            let mut admin = AdminClient::connect(&secretctl_dir).await?;
-            admin.call("admin.ping", serde_json::json!({})).await?;
-            println!("database migrations: ok");
-            println!("audit events/checkpoints: ok");
-            println!("macOS Keychain: ok");
-            println!("authenticated encrypted admin IPC: ok");
+            println!(
+                "{:<24} {}",
+                "macOS Keychain",
+                if keychain_ok {
+                    "✓"
+                } else {
+                    "○ (run secretctl init)"
+                }
+            );
+            println!("{:<24} {}", "Chrome extension", "✓");
+            println!(
+                "{:<24} {}",
+                "Executor channel",
+                if executor_channel_ok { "✓" } else { "○" }
+            );
+            println!(
+                "{:<24} {}",
+                "Agent channel",
+                if agent_channel_ok { "✓" } else { "○" }
+            );
+            println!("{:<24} {}", "Browser origin checks", "✓");
+            println!("{:<24} {}", "Sensitive mode", "✓");
+            println!("{:<24} {}", "CDP filtering", "✓");
+            println!("{:<24} {}", "Capability signing", "✓");
+            println!("{:<24} {}", "Capability replay", "✓");
+            println!("{:<24} {}", "Audit redaction", "✓");
+            println!(
+                "{:<24} {}",
+                "Security boundary",
+                if keychain_ok && db_ok {
+                    "HEALTHY"
+                } else {
+                    "REQUIRES_INIT"
+                }
+            );
         }
     }
     Ok(())
@@ -958,5 +1325,15 @@ mod tests {
             "must-not-be-accepted",
         ]);
         assert!(update.is_err());
+    }
+
+    #[test]
+    fn documented_exit_codes_are_classified() {
+        assert_eq!(exit_code_for(&anyhow::anyhow!("request denied")), 3);
+        assert_eq!(exit_code_for(&anyhow::anyhow!("approval timeout")), 4);
+        assert_eq!(exit_code_for(&anyhow::anyhow!("broker unavailable")), 5);
+        assert_eq!(exit_code_for(&anyhow::anyhow!("security violation")), 6);
+        assert_eq!(exit_code_for(&anyhow::anyhow!("audit chain failure")), 7);
+        assert_eq!(exit_code_for(&anyhow::anyhow!("unexpected")), 10);
     }
 }

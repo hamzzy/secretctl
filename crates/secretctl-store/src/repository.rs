@@ -2,12 +2,35 @@ use crate::error::StoreError;
 use crate::migrations::apply_migrations;
 use rusqlite::{Connection, params};
 use secretctl_domain::{
-    ActionKind, AgentId, AgentPrincipal, Approval, AuditCheckpoint, AuditEvent, Capability,
-    CapabilityId, CapabilitySummary, CredentialDescriptor, CredentialId, EventId, Execution,
-    RequestId,
+    ActionKind, AgentId, AgentPrincipal, Approval, AuditCheckpoint, AuditEvent, CanonicalOrigin,
+    Capability, CapabilityId, CapabilitySummary, CredentialDescriptor, CredentialId, EventId,
+    Execution, GrantId, RequestId, RiskLevel, StandingGrant,
 };
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+
+/// Which standing grants a revocation targets. Revoking by agent or by
+/// credential is the common case: a human who no longer trusts one agent
+/// should not have to enumerate its grants.
+#[derive(Debug, Clone)]
+pub enum GrantSelector {
+    Id(GrantId),
+    Agent(String),
+    Credential(String),
+    All,
+}
+
+impl GrantSelector {
+    pub fn matches(&self, grant: &StandingGrant) -> bool {
+        match self {
+            Self::Id(grant_id) => &grant.grant_id == grant_id,
+            Self::Agent(name) => &grant.agent_name == name || grant.agent_id.as_str() == name,
+            Self::Credential(name) => &grant.credential_name == name,
+            Self::All => true,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -614,6 +637,35 @@ impl SqliteStore {
             .map_err(StoreError::from)
     }
 
+    pub fn capability_state(&self, capability_id: &CapabilityId) -> Result<String, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT state FROM capabilities WHERE capability_id = ?1",
+            [capability_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+    }
+
+    pub fn execution_count(&self) -> Result<u64, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM executions", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    pub fn execution_state_for_capability(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<String, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT state FROM executions WHERE capability_id = ?1 ORDER BY started_at DESC LIMIT 1",
+            [capability_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+    }
+
     pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut statement = conn.prepare(
@@ -833,6 +885,213 @@ impl SqliteStore {
             .filter(|(_, _, state)| state == "active")
             .max_by_key(|(version, _, _)| *version)
             .map(|(version, locator, _)| (version, locator)))
+    }
+
+    /// Persist a standing grant together with the audit event that records its
+    /// creation. Creation and audit share one transaction so a grant can never
+    /// exist without a trail.
+    pub fn insert_standing_grant_with_audit(
+        &self,
+        grant: &StandingGrant,
+        audit_event: &AuditEvent,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Replacing a live grant for the same tuple is an extension, not a
+        // second grant: revoke the old row first so the unique index holds.
+        tx.execute(
+            "UPDATE standing_grants
+             SET revoked_at = ?1, revoked_reason = 'superseded'
+             WHERE revoked_at IS NULL
+               AND agent_id = ?2 AND credential_name = ?3 AND origin = ?4 AND action = ?5",
+            params![
+                grant.created_at.to_rfc3339(),
+                grant.agent_id.as_str(),
+                grant.credential_name,
+                grant.origin.as_str(),
+                grant.action.as_str(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO standing_grants
+             (grant_id, agent_id, agent_name, credential_id, credential_name, origin, action,
+              risk_ceiling, require_presence, created_at, expires_at, revoked_at,
+              revoked_reason, last_used_at, use_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, NULL, 0)",
+            params![
+                grant.grant_id.as_str(),
+                grant.agent_id.as_str(),
+                grant.agent_name,
+                grant.credential_id.as_str(),
+                grant.credential_name,
+                grant.origin.as_str(),
+                grant.action.as_str(),
+                grant.risk_ceiling.as_str(),
+                grant.require_presence as i64,
+                grant.created_at.to_rfc3339(),
+                grant.expires_at.to_rfc3339(),
+            ],
+        )?;
+        Self::insert_audit_event_tx(&tx, audit_event)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn row_to_standing_grant(row: &rusqlite::Row<'_>) -> rusqlite::Result<StandingGrant> {
+        fn conversion<E>(index: usize, error: E) -> rusqlite::Error
+        where
+            E: std::error::Error + Send + Sync + 'static,
+        {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        }
+        fn timestamp(
+            value: Option<String>,
+            index: usize,
+        ) -> rusqlite::Result<Option<chrono::DateTime<chrono::Utc>>> {
+            value
+                .map(|raw| {
+                    chrono::DateTime::parse_from_rfc3339(&raw)
+                        .map(|parsed| parsed.with_timezone(&chrono::Utc))
+                        .map_err(|error| conversion(index, error))
+                })
+                .transpose()
+        }
+
+        let grant_id: String = row.get(0)?;
+        let agent_id: String = row.get(1)?;
+        let credential_id: String = row.get(3)?;
+        let origin: String = row.get(5)?;
+        let action: String = row.get(6)?;
+        let risk_ceiling: String = row.get(7)?;
+        let created_at: String = row.get(9)?;
+        let expires_at: String = row.get(10)?;
+
+        Ok(StandingGrant {
+            grant_id: GrantId::parse(&grant_id).map_err(|error| conversion(0, error))?,
+            agent_id: AgentId::parse(&agent_id).map_err(|error| conversion(1, error))?,
+            agent_name: row.get(2)?,
+            credential_id: CredentialId::parse(&credential_id)
+                .map_err(|error| conversion(3, error))?,
+            credential_name: row.get(4)?,
+            origin: CanonicalOrigin::parse(&origin).map_err(|error| conversion(5, error))?,
+            action: ActionKind::from_str(&action).map_err(|error| conversion(6, error))?,
+            risk_ceiling: RiskLevel::from_str(&risk_ceiling)
+                .map_err(|error| conversion(7, error))?,
+            require_presence: row.get::<_, i64>(8)? != 0,
+            created_at: timestamp(Some(created_at), 9)?.expect("created_at is non-null"),
+            expires_at: timestamp(Some(expires_at), 10)?.expect("expires_at is non-null"),
+            revoked_at: timestamp(row.get(11)?, 11)?,
+            revoked_reason: row.get(12)?,
+            last_used_at: timestamp(row.get(13)?, 13)?,
+            use_count: row.get::<_, i64>(14)?.max(0) as u64,
+        })
+    }
+
+    const GRANT_COLUMNS: &'static str = "grant_id, agent_id, agent_name, credential_id, \
+         credential_name, origin, action, risk_ceiling, require_presence, created_at, \
+         expires_at, revoked_at, revoked_reason, last_used_at, use_count";
+
+    /// List grants, newest first. `include_revoked` controls whether the
+    /// historical rows come back alongside the live ones.
+    pub fn list_standing_grants(
+        &self,
+        include_revoked: bool,
+    ) -> Result<Vec<StandingGrant>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM standing_grants {} ORDER BY created_at DESC",
+            Self::GRANT_COLUMNS,
+            if include_revoked {
+                ""
+            } else {
+                "WHERE revoked_at IS NULL"
+            }
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let grants = statement
+            .query_map([], Self::row_to_standing_grant)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(grants)
+    }
+
+    /// Find the live grant covering exactly this tuple, if one exists.
+    ///
+    /// The origin and action comparison happens in SQL on canonical strings, so
+    /// a grant for `https://github.com:443` can never be retrieved for any
+    /// other origin.
+    pub fn find_matching_standing_grant(
+        &self,
+        agent_id: &AgentId,
+        credential_name: &str,
+        action: ActionKind,
+        origin: &CanonicalOrigin,
+    ) -> Result<Option<StandingGrant>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM standing_grants
+             WHERE revoked_at IS NULL
+               AND agent_id = ?1 AND credential_name = ?2 AND action = ?3 AND origin = ?4
+             LIMIT 1",
+            Self::GRANT_COLUMNS
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query_map(
+            params![
+                agent_id.as_str(),
+                credential_name,
+                action.as_str(),
+                origin.as_str()
+            ],
+            Self::row_to_standing_grant,
+        )?;
+        rows.next().transpose().map_err(StoreError::Sqlite)
+    }
+
+    /// Record that a grant authorized a request. Usage counters make
+    /// `secretctl grants` show which standing permissions are actually live.
+    pub fn touch_standing_grant(
+        &self,
+        grant_id: &GrantId,
+        used_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE standing_grants SET last_used_at = ?1, use_count = use_count + 1
+             WHERE grant_id = ?2",
+            params![used_at.to_rfc3339(), grant_id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Revoke every live grant matching the selector, returning the revoked
+    /// grants so the caller can audit each one individually.
+    pub fn revoke_standing_grants(
+        &self,
+        selector: &GrantSelector,
+        reason: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<StandingGrant>, StoreError> {
+        let matching: Vec<StandingGrant> = self
+            .list_standing_grants(false)?
+            .into_iter()
+            .filter(|grant| selector.matches(grant))
+            .collect();
+        if matching.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        for grant in &matching {
+            conn.execute(
+                "UPDATE standing_grants SET revoked_at = ?1, revoked_reason = ?2
+                 WHERE grant_id = ?3 AND revoked_at IS NULL",
+                params![revoked_at.to_rfc3339(), reason, grant.grant_id.as_str()],
+            )?;
+        }
+        Ok(matching)
     }
 
     #[doc(hidden)]

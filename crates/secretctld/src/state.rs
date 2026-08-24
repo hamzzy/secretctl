@@ -120,13 +120,36 @@ impl BrokerState {
         provider: Arc<dyn SecretProvider>,
         policy_evaluator: PolicyEvaluator,
     ) -> Self {
-        let initial_hash = store
-            .get_latest_audit_hash()
-            .unwrap_or_else(|_| secretctl_audit::GENESIS_PREVIOUS_HASH.to_vec());
-        let initial_sequence = store.get_latest_audit_sequence().unwrap_or(0) + 1;
-        let _ = store.recover_incomplete_state();
+        Self::try_new_with_audit_key(
+            broker_key,
+            key_id,
+            audit_key,
+            audit_key_version,
+            store,
+            provider,
+            policy_evaluator,
+        )
+        .expect("broker state initialization must recover persisted state")
+    }
 
-        Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_audit_key(
+        broker_key: KeyPair,
+        key_id: impl Into<String>,
+        audit_key: SecretBytes,
+        audit_key_version: u32,
+        store: SqliteStore,
+        provider: Arc<dyn SecretProvider>,
+        policy_evaluator: PolicyEvaluator,
+    ) -> Result<Self, secretctl_store::StoreError> {
+        // Recovery is part of opening the broker, not best-effort maintenance. A
+        // database error here must keep the daemon offline so an issued token or
+        // in-flight execution is never accidentally reused after a crash.
+        store.recover_incomplete_state()?;
+        let initial_hash = store.get_latest_audit_hash()?;
+        let initial_sequence = store.get_latest_audit_sequence()? + 1;
+
+        Ok(Self {
             broker_key: Arc::new(broker_key),
             key_id: key_id.into(),
             store,
@@ -147,7 +170,7 @@ impl BrokerState {
                 next_sequence: initial_sequence,
                 latest_hash: initial_hash,
             })),
-        }
+        })
     }
 
     pub fn record_audit_event(
@@ -210,6 +233,17 @@ impl BrokerState {
         self.store
             .insert_audit_checkpoint(&checkpoint)
             .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Checkpoint unavailable"))
+    }
+
+    pub fn verify_audit_integrity(&self) -> Result<(), RpcError> {
+        let events = self
+            .store
+            .list_audit_events()
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit unavailable"))?;
+        let audit_keys =
+            HashMap::from([(self.audit_key_version, self.audit_key.as_bytes().to_vec())]);
+        secretctl_audit::verify_audit_chain(&events, &audit_keys)
+            .map_err(|_| RpcError::new(RpcErrorCode::INTERNAL_ERROR, "Audit integrity failure"))
     }
 
     pub fn register_recipe(&self, recipe: SiteRecipe) {
@@ -799,7 +833,14 @@ impl BrokerState {
             })
             .collect::<Vec<_>>();
         for (approval_id, context_digest) in &expired {
-            self.decide_approval(approval_id, false, context_digest, "broker-timeout", false)?;
+            self.decide_approval_at(
+                approval_id,
+                false,
+                context_digest,
+                "broker-timeout",
+                false,
+                now,
+            )?;
         }
         Ok(expired.len())
     }
@@ -812,6 +853,25 @@ impl BrokerState {
         actor: &str,
         presence_verified: bool,
     ) -> Result<ActionResponseResult, RpcError> {
+        self.decide_approval_at(
+            approval_id,
+            approve,
+            context_digest,
+            actor,
+            presence_verified,
+            Utc::now(),
+        )
+    }
+
+    fn decide_approval_at(
+        &self,
+        approval_id: &ApprovalId,
+        approve: bool,
+        context_digest: &[u8],
+        actor: &str,
+        presence_verified: bool,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<ActionResponseResult, RpcError> {
         let mut pending = self
             .approvals
             .lock()
@@ -819,7 +879,6 @@ impl BrokerState {
             .get(approval_id)
             .cloned()
             .ok_or_else(|| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown approval ID"))?;
-        let now = Utc::now();
         let latest_context = self
             .page_contexts
             .read()

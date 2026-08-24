@@ -425,6 +425,17 @@ async fn test_concurrent_consume_race_condition() {
     // Atomic invariant: exactly 1 winner, 99 rejected
     assert_eq!(success_count, 1);
     assert_eq!(failure_count, 99);
+    assert_eq!(broker.store.execution_count().unwrap(), 1);
+    assert_eq!(
+        broker
+            .store
+            .list_audit_events()
+            .unwrap()
+            .iter()
+            .filter(|event| event.event_type == "capability.consumed")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -702,6 +713,15 @@ async fn test_policy_reload_revokes_old_policy_capabilities() {
         entry.capability.state == secretctl_domain::CapabilityState::Revoked
             && entry.capability.revoked_reason.as_deref() == Some("policy_changed")
     }));
+    drop(capabilities);
+    assert!(
+        broker
+            .store
+            .list_capabilities(Some("revoked"))
+            .unwrap()
+            .iter()
+            .all(|capability| capability.revoked_reason.as_deref() == Some("policy_changed"))
+    );
 }
 
 #[tokio::test]
@@ -768,6 +788,235 @@ async fn test_required_approval_denial_never_mints_capability() {
         .unwrap();
     assert_eq!(denied.state, secretctl_domain::ActionRequestState::Denied);
     assert!(broker.capabilities.lock().unwrap().is_empty());
+    assert!(
+        broker
+            .store
+            .list_audit_events()
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == "approval.denied")
+    );
+}
+
+#[tokio::test]
+async fn test_approval_timeout_retrieves_no_secret_and_is_audited() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker
+        .replace_policy(PolicyEvaluator::new(PolicyDocument {
+            version: "approval-timeout".to_string(),
+            rules: vec![PolicyRule {
+                id: secretctl_domain::RuleId::parse("rule_timeout").unwrap(),
+                description: None,
+                effect: secretctl_domain::PolicyEffect::Allow,
+                principals: vec!["*".to_string()],
+                credentials: vec!["github-work".to_string()],
+                actions: vec![ActionKind::AuthenticatePassword],
+                destinations: vec![DestinationRule {
+                    origin: origin.clone(),
+                    path_prefix: Some("/login".to_string()),
+                }],
+                conditions: RuleConditions {
+                    browser_assurance: Some("managed".to_string()),
+                    require_user_presence: true,
+                    max_uses: 1,
+                    max_ttl_seconds: 30,
+                },
+            }],
+        }))
+        .unwrap();
+    let response = broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin,
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id,
+                tab_hint: Some(1),
+                reason: "approval timeout".to_string(),
+                wait: false,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.state,
+        secretctl_domain::ActionRequestState::AwaitingApproval
+    );
+    assert_eq!(
+        broker
+            .expire_pending_approvals(Utc::now() + chrono::Duration::seconds(61))
+            .unwrap(),
+        1
+    );
+    assert!(broker.capabilities.lock().unwrap().is_empty());
+    assert!(
+        broker
+            .store
+            .list_audit_events()
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == "approval.expired")
+    );
+}
+
+#[tokio::test]
+async fn test_audit_storage_failure_rolls_back_consume_before_secret_retrieval() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin: origin.clone(),
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id.clone(),
+                tab_hint: Some(1),
+                reason: "audit failure".to_string(),
+                wait: false,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (capability_id, token) = {
+        let capabilities = broker.capabilities.lock().unwrap();
+        let entry = capabilities.values().next().unwrap();
+        (entry.capability.capability_id.clone(), entry.token.clone())
+    };
+    broker
+        .store
+        .install_audit_failure_trigger_for_tests()
+        .unwrap();
+    let result = broker
+        .handle_executor_consume(ExecutorConsumeParams {
+            capability_token: token,
+            session_signature: "mock".to_string(),
+            current_context: ExecutorContextPayload {
+                browser_session_id: session_id,
+                tab_id: 1,
+                frame_id: 0,
+                document_id: "doc-1".to_string(),
+                navigation_epoch: 1,
+                top_origin: origin.clone(),
+                frame_origin: origin,
+                path: "/login".to_string(),
+                path_sha256: "path-hash".to_string(),
+                tls: true,
+                incognito: false,
+            },
+        })
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        broker.store.capability_state(&capability_id).unwrap(),
+        "issued"
+    );
+    assert_eq!(broker.store.execution_count().unwrap(), 0);
+    assert_eq!(
+        broker
+            .capabilities
+            .lock()
+            .unwrap()
+            .get(&capability_id)
+            .unwrap()
+            .capability
+            .state,
+        secretctl_domain::CapabilityState::Issued
+    );
+    broker.verify_audit_integrity().unwrap();
+}
+
+#[tokio::test]
+async fn test_restart_marks_consuming_execution_indeterminate_and_never_reissues() {
+    let (broker, session_id, origin) = setup_test_broker().await;
+    broker
+        .handle_action_request(
+            AgentId::new(),
+            ActionRequestParams {
+                request_id: RequestId::new(),
+                action: ActionKind::AuthenticatePassword,
+                identity: "github-work".to_string(),
+                target: TargetOriginConstraint {
+                    origin: origin.clone(),
+                    path_prefix: Some("/login".to_string()),
+                },
+                browser_session_id: session_id.clone(),
+                tab_hint: Some(1),
+                reason: "restart recovery".to_string(),
+                wait: false,
+                timeout_ms: 30_000,
+                client_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (capability_id, token) = {
+        let capabilities = broker.capabilities.lock().unwrap();
+        let entry = capabilities.values().next().unwrap();
+        (entry.capability.capability_id.clone(), entry.token.clone())
+    };
+    broker
+        .handle_executor_consume(ExecutorConsumeParams {
+            capability_token: token,
+            session_signature: "authenticated-channel".to_string(),
+            current_context: ExecutorContextPayload {
+                browser_session_id: session_id,
+                tab_id: 1,
+                frame_id: 0,
+                document_id: "doc-1".to_string(),
+                navigation_epoch: 1,
+                top_origin: origin.clone(),
+                frame_origin: origin,
+                path: "/login".to_string(),
+                path_sha256: "path-hash".to_string(),
+                tls: true,
+                incognito: false,
+            },
+        })
+        .await
+        .unwrap();
+
+    let store = broker.store.clone();
+    assert_eq!(store.capability_state(&capability_id).unwrap(), "consumed");
+    assert_eq!(
+        store
+            .execution_state_for_capability(&capability_id)
+            .unwrap(),
+        "consuming"
+    );
+
+    let _restarted = BrokerState::try_new_with_audit_key(
+        KeyPair::generate(),
+        "restart-key",
+        secretctl_crypto::SecretBytes::new(vec![7; 32]),
+        1,
+        store.clone(),
+        Arc::new(MemorySecretProvider::new()),
+        PolicyEvaluator::new(PolicyDocument {
+            version: "1.0".to_string(),
+            rules: vec![],
+        }),
+    )
+    .unwrap();
+    assert_eq!(store.capability_state(&capability_id).unwrap(), "consumed");
+    assert_eq!(
+        store
+            .execution_state_for_capability(&capability_id)
+            .unwrap(),
+        "indeterminate"
+    );
 }
 
 #[tokio::test]

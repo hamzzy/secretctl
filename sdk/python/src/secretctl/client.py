@@ -220,6 +220,27 @@ class SecretCtl:
             self._client.execute(request), self._loop
         ).result()
 
+    def authenticate(
+        self,
+        credential: str,
+        reason: str = "Automated authentication",
+        origin: Optional[str] = None,
+        path_prefix: Optional[str] = None,
+        session: Optional[str] = None,
+        action: str = "authenticate.password",
+    ) -> ExecuteResult:
+        return asyncio.run_coroutine_threadsafe(
+            self._client.authenticate(
+                credential=credential,
+                reason=reason,
+                origin=origin,
+                path_prefix=path_prefix,
+                session=session,
+                action=action,
+            ),
+            self._loop,
+        ).result()
+
     def status(self, request_id: str) -> ActionStatus:
         return asyncio.run_coroutine_threadsafe(
             self._client.status(request_id), self._loop

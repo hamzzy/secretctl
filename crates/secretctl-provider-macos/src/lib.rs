@@ -104,6 +104,36 @@ impl SecretProvider for MacOsKeychainProvider {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod macos_integration_tests {
+    use super::*;
+
+    /// Real-Keychain acceptance coverage. This is ignored in the default suite
+    /// because macOS may display an access prompt in non-interactive CI.
+    #[tokio::test]
+    #[ignore = "requires an unlocked interactive macOS Keychain"]
+    async fn stores_reads_and_deletes_a_canary_in_the_real_keychain() {
+        let unique = format!(
+            "secretctl-m1-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let locator = "at20-canary";
+        let canary = b"secretctl-at20-canary-value";
+        let provider = MacOsKeychainProvider::with_service(unique);
+
+        provider.store_secret(locator, canary).await.unwrap();
+        assert!(provider.exists(locator).await.unwrap());
+        let loaded = provider.get_secret(locator).await.unwrap();
+        assert_eq!(loaded.as_bytes(), canary);
+        provider.delete_secret(locator).await.unwrap();
+        assert!(!provider.exists(locator).await.unwrap());
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 #[async_trait]
 impl SecretProvider for MacOsKeychainProvider {

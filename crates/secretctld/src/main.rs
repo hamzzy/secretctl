@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    println!("Starting secretctld daemon...");
+    tracing::info!("starting secretctld daemon");
 
     let secretctl_dir = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         let secret = provider.get_secret("installation-signing-key").await?;
         KeyPair::from_bytes(secret.as_bytes())?
     } else {
-        println!("No installation signing key found. Generating a new key in macOS Keychain...");
+        tracing::info!("generating installation signing key in macOS Keychain");
         let keypair = KeyPair::generate();
         provider
             .store_secret("installation-signing-key", &keypair.to_bytes())
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
     if store.active_audit_key_version()?.is_none() {
         store.register_audit_key_version(audit_key_version, &audit_key_locator, "active")?;
     }
-    let state = BrokerState::new_with_audit_key(
+    let state = BrokerState::try_new_with_audit_key(
         broker_key,
         signing_key_id,
         audit_key,
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         provider,
         evaluator,
-    );
+    )?;
 
     let recipes_dir = secretctl_dir.join("recipes");
     if recipes_dir.exists() {
