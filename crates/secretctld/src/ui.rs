@@ -16,8 +16,8 @@ use base64::Engine;
 use chrono::Utc;
 use secretctl_audit::AuditContext;
 use secretctl_domain::{
-    ActionKind, AgentId, ApprovalId, BrowserSessionState, CapabilityState, GrantId,
-    MAX_GRANT_TTL_DAYS, MAX_GRANTABLE_RISK, RiskLevel, StandingGrant,
+    ActionKind, AgentId, ApprovalId, BrowserSessionState, CapabilityState, ExecutionState,
+    GrantId, MAX_GRANT_TTL_DAYS, MAX_GRANTABLE_RISK, RiskLevel, StandingGrant,
 };
 use secretctl_protocol::{
     GrantCreateParams, GrantCreateResult, GrantRevokeResult, ReasonSource, RpcError, RpcErrorCode,
@@ -141,16 +141,48 @@ impl BrokerState {
             .collect())
     }
 
+    /// Agents that have previously had a capability minted for them.
+    ///
+    /// `capability.minted` records no actor — it is emitted by the broker, not
+    /// the agent — so the link is made through `request_id`, which
+    /// `action.requested` ties to the requesting agent. Counting
+    /// `action.requested` alone would be wrong: the request being decided right
+    /// now is already in the trail, and every agent would look familiar.
     fn agents_with_prior_authorization(&self) -> Result<HashSet<AgentId>, RpcError> {
         let events = self
             .store
             .list_audit_events()
             .map_err(|_| internal("Audit storage unavailable"))?;
-        Ok(events
+
+        let mut request_agents: HashMap<String, AgentId> = HashMap::new();
+        let mut authorized_requests: HashSet<String> = HashSet::new();
+        for event in &events {
+            let Ok(context) = serde_json::from_str::<AuditContext>(&event.event_json) else {
+                continue;
+            };
+            let Some(request_id) = context.request_id else {
+                continue;
+            };
+            match event.event_type.as_str() {
+                "action.requested" => {
+                    if let Some(agent) = event
+                        .actor_id
+                        .as_deref()
+                        .and_then(|actor| AgentId::parse(actor).ok())
+                    {
+                        request_agents.insert(request_id, agent);
+                    }
+                }
+                "capability.minted" => {
+                    authorized_requests.insert(request_id);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(authorized_requests
             .iter()
-            .filter(|event| event.event_type == "capability.issued")
-            .filter_map(|event| event.actor_id.as_deref())
-            .filter_map(|actor| AgentId::parse(actor).ok())
+            .filter_map(|request_id| request_agents.get(request_id).cloned())
             .collect())
     }
 
@@ -280,6 +312,21 @@ impl BrokerState {
         &self,
         now: chrono::DateTime<Utc>,
     ) -> Result<Option<UiProtectionState>, RpcError> {
+        // An execution the broker could not resolve either way outranks any
+        // audit row: claiming success or failure there would be a guess.
+        let executions = self.executions.lock().unwrap();
+        let uncertain = executions.values().any(|active| {
+            active.execution.state == ExecutionState::Indeterminate
+                && active
+                    .execution
+                    .completed_at
+                    .is_some_and(|at| now - at <= chrono::Duration::seconds(TERMINAL_STATE_LINGER_SECONDS))
+        });
+        drop(executions);
+        if uncertain {
+            return Ok(Some(UiProtectionState::OutcomeUncertain));
+        }
+
         let events = self
             .store
             .list_audit_events()
@@ -292,10 +339,11 @@ impl BrokerState {
         }
         Ok(match latest.event_type.as_str() {
             "execution.completed" => Some(UiProtectionState::Completed),
-            "approval.denied" | "policy.denied" | "capability.rejected" => {
-                Some(UiProtectionState::Blocked)
-            }
-            "execution.uncertain" => Some(UiProtectionState::OutcomeUncertain),
+            "execution.failed"
+            | "approval.denied"
+            | "approval.expired"
+            | "capability.revoked" => Some(UiProtectionState::Blocked),
+            "approval.invalidated" => Some(UiProtectionState::ProtectionInterrupted),
             _ => None,
         })
     }
@@ -869,46 +917,70 @@ fn empty_audit_context() -> AuditContext {
     }
 }
 
-/// Human summary for an activity row. Deliberately avoids internal error codes
-/// and state machine vocabulary; the technical detail stays behind a disclosure.
+/// Human summary for an activity row.
+///
+/// Deliberately avoids internal error codes and state-machine vocabulary; the
+/// technical detail stays behind a disclosure (spec §19, §24). The arms below
+/// cover the event types `secretctld` actually emits — an unrecognised type
+/// degrades to a readable form rather than being hidden, so a new event never
+/// silently disappears from the activity list.
 fn summarize_event(event_type: &str, origin: Option<&str>) -> String {
     let site = origin
         .and_then(|value| value.split("://").nth(1))
         .map(|host| host.trim_end_matches(":443").to_string());
     match event_type {
+        "action.requested" => "Credential action requested".to_string(),
         "approval.requested" => "Authorization requested".to_string(),
-        "approval.granted" => "Authorization approved".to_string(),
+        "approval.approved" => "Authorization approved".to_string(),
+        "approval.auto_granted" => "Approved by standing authorization".to_string(),
         "approval.denied" => "Authorization denied".to_string(),
-        "capability.issued" => "Capability issued".to_string(),
+        "approval.expired" => "Authorization request expired".to_string(),
+        // The page moved under the request. Not a failure of the user's intent.
+        "approval.invalidated" => "Page changed before authorization completed".to_string(),
+        "capability.minted" => "Capability issued".to_string(),
+        "capability.consumed" => "Credential delivered to the browser".to_string(),
         "capability.revoked" => "Capability revoked".to_string(),
-        "execution.started" => match site {
-            Some(host) => format!("Signing in to {host}"),
-            None => "Credential execution started".to_string(),
-        },
+        // Names the retrieval, never the value: the broker fetched a secret
+        // from the provider and handed it to the executor, not to the agent.
+        "secret.retrieve_succeeded" => "Credential retrieved from provider".to_string(),
         "execution.completed" => match site {
             Some(host) => format!("{host} authentication completed"),
             None => "Authentication completed".to_string(),
         },
         "execution.failed" => "Authentication blocked".to_string(),
-        "execution.uncertain" => "Authentication result unverified".to_string(),
-        "policy.denied" => "Blocked by policy".to_string(),
+        "policy.evaluated" => "Policy evaluated".to_string(),
+        "policy.reloaded" => "Policy reloaded".to_string(),
+        "browser.registered" => "Browser session connected".to_string(),
         "browser.stale" => "Protection interrupted".to_string(),
+        "agent.enrolled" => "Agent enrolled".to_string(),
+        "agent.disabled" => "Agent disabled".to_string(),
         "grant.created" => "Standing authorization created".to_string(),
         "grant.revoked" => "Standing authorization revoked".to_string(),
-        "agent.disabled" => "Agent disabled".to_string(),
+        "audit.checkpoint" => "Audit checkpoint written".to_string(),
         other => other.replace('.', " "),
     }
 }
 
 fn classify_event(event_type: &str, decision: Option<&str>) -> UiEventOutcome {
     match event_type {
-        "execution.completed" | "approval.granted" | "grant.created" => UiEventOutcome::Success,
-        "approval.denied" | "policy.denied" | "execution.failed" | "capability.revoked"
-        | "agent.disabled" | "grant.revoked" => UiEventOutcome::Denied,
+        "execution.completed"
+        | "approval.approved"
+        | "approval.auto_granted"
+        | "grant.created" => UiEventOutcome::Success,
+        "approval.denied"
+        | "approval.expired"
+        | "execution.failed"
+        | "capability.revoked"
+        | "agent.disabled"
+        | "grant.revoked" => UiEventOutcome::Denied,
         "approval.requested" => UiEventOutcome::Pending,
-        "browser.stale" | "execution.uncertain" => UiEventOutcome::Interrupted,
+        "browser.stale" | "approval.invalidated" => UiEventOutcome::Interrupted,
+        // `policy.evaluated` records both allows and denies, so the decision
+        // field is what distinguishes them.
         _ => match decision {
-            Some("denied") | Some("invalidated") | Some("expired") => UiEventOutcome::Denied,
+            Some("deny") | Some("denied") | Some("invalidated") | Some("expired") => {
+                UiEventOutcome::Denied
+            }
             _ => UiEventOutcome::Info,
         },
     }
@@ -949,8 +1021,10 @@ mod ui_projection_tests {
             classify_event("browser.stale", None),
             UiEventOutcome::Interrupted
         );
+        // A page that navigated out from under a pending approval is likewise
+        // an interruption, not a denial of what the user wanted.
         assert_eq!(
-            classify_event("execution.uncertain", None),
+            classify_event("approval.invalidated", None),
             UiEventOutcome::Interrupted
         );
     }
@@ -959,9 +1033,11 @@ mod ui_projection_tests {
     fn summaries_never_leak_internal_error_vocabulary() {
         for event_type in [
             "approval.denied",
+            "approval.expired",
+            "approval.invalidated",
             "execution.failed",
             "browser.stale",
-            "policy.denied",
+            "capability.revoked",
         ] {
             let summary = summarize_event(event_type, Some("https://github.com:443"));
             assert!(!summary.contains("EPOCH"));

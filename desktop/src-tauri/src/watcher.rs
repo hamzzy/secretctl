@@ -34,6 +34,7 @@ pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut announced: HashSet<String> = HashSet::new();
         let mut previous_state: Option<UiProtectionState> = None;
+        let mut confirmed_completion = false;
 
         loop {
             let connection = app.state::<AdminConnection>();
@@ -50,6 +51,7 @@ pub fn spawn(app: AppHandle) {
 
             if previous_state != Some(state) {
                 crate::tray::apply_state(&app, state);
+                announce_outcome(&app, previous_state, state, &mut confirmed_completion);
                 previous_state = Some(state);
             }
 
@@ -141,6 +143,66 @@ fn announce_new_requests(
                 tracing::error!(%error, "could not open approval window");
             }
         }
+    }
+}
+
+/// Confirm a finished operation, once.
+///
+/// The confirmation exists so the user knows the flow ended and the agent can
+/// carry on — it is not a security notice, and it is suppressed entirely when
+/// the user has turned notifications off. The fail-closed states are announced
+/// regardless of the completion preference, because "your protection could not
+/// be verified" is not a courtesy message.
+fn announce_outcome(
+    app: &AppHandle,
+    previous: Option<UiProtectionState>,
+    current: UiProtectionState,
+    confirmed_completion: &mut bool,
+) {
+    let settings = settings::load();
+    if settings.notification_detail == NotificationDetail::Disabled {
+        return;
+    }
+    // Only report an outcome that follows an operation we actually saw start.
+    let was_active = matches!(
+        previous,
+        Some(UiProtectionState::SensitiveOperation) | Some(UiProtectionState::ApprovalRequired)
+    );
+
+    let (title, body) = match current {
+        UiProtectionState::Completed if was_active && settings.confirm_completion => {
+            if *confirmed_completion {
+                return;
+            }
+            *confirmed_completion = true;
+            (
+                "Authentication completed",
+                "The agent can continue its task.".to_string(),
+            )
+        }
+        UiProtectionState::ProtectionInterrupted => (
+            "Protection interrupted",
+            "secretctl could no longer verify browser protection, so credential \
+             release was halted."
+                .to_string(),
+        ),
+        UiProtectionState::OutcomeUncertain => (
+            "Result could not be verified",
+            "The operation may have completed, but secretctl lost confirmation \
+             from the browser. No further credential operation will run until \
+             the session is re-established."
+                .to_string(),
+        ),
+        _ => {
+            if current == UiProtectionState::SensitiveOperation {
+                *confirmed_completion = false;
+            }
+            return;
+        }
+    };
+
+    if let Err(error) = app.notification().builder().title(title).body(body).show() {
+        tracing::warn!(%error, "could not post outcome notification");
     }
 }
 

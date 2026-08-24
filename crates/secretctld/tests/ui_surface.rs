@@ -621,3 +621,76 @@ fn refresh_page_context(harness: &Harness, epoch: u64) {
         harness.session_id.clone(),
     );
 }
+
+#[tokio::test]
+async fn an_agent_stops_being_first_seen_once_it_has_been_authorized() {
+    let harness = setup(true, RiskLevel::Medium).await;
+    request_authentication(&harness, "Review open pull requests").await;
+
+    let first = harness.broker.ui_pending_approvals().unwrap();
+    assert!(
+        first[0].is_first_for_agent,
+        "an agent with no history is first-seen"
+    );
+
+    // Approve, which mints a capability and records the agent's first
+    // authorization in the trail.
+    let digest = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &first[0].context_digest,
+    )
+    .unwrap();
+    harness
+        .broker
+        .decide_approval(
+            &secretctl_domain::ApprovalId::parse(&first[0].approval_id).unwrap(),
+            true,
+            &digest,
+            "local-admin",
+            true,
+        )
+        .expect("approved");
+
+    refresh_page_context(&harness, 2);
+    request_authentication(&harness, "Review pull requests again").await;
+
+    let second = harness.broker.ui_pending_approvals().unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(
+        !second[0].is_first_for_agent,
+        "an agent that has already been authorized is not first-seen"
+    );
+}
+
+#[tokio::test]
+async fn activity_summaries_track_the_event_types_the_broker_actually_emits() {
+    // Pins the projection to the daemon's real vocabulary. If an event type is
+    // renamed, this fails rather than the activity list quietly degrading to
+    // the raw identifier.
+    let harness = setup(true, RiskLevel::Medium).await;
+    request_authentication(&harness, "Review open pull requests").await;
+
+    let events = harness.broker.ui_activity(200).unwrap();
+    let seen: Vec<&str> = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect();
+
+    for event_type in ["action.requested", "approval.requested"] {
+        assert!(
+            seen.contains(&event_type),
+            "expected the broker to emit {event_type}, saw {seen:?}"
+        );
+    }
+
+    // No row may fall through to the raw-identifier fallback, which is what an
+    // unmapped event would produce.
+    for event in &events {
+        assert!(
+            !event.summary.contains('.'),
+            "event type {} has no human summary (fell back to '{}')",
+            event.event_type,
+            event.summary
+        );
+    }
+}
