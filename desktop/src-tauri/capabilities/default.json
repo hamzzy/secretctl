@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The complete privilege set of the secretctl frontend. Everything the UI is allowed to do is named here; nothing else is reachable from JavaScript. There is deliberately no filesystem, shell, http, or process permission: the frontend is a display layer that talks to secretctld through the narrow command surface below, and holds no authority of its own.",
+  "windows": ["popover", "approval", "manage", "onboarding"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-start-dragging",
+    "core:webview:allow-create-webview-window",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "notification:default"
+  ]
+}

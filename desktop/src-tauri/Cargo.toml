@@ -1,0 +1,55 @@
+[package]
+name = "secretctl-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["secretctl contributors"]
+description = "secretctl menu-bar control surface"
+
+# Deliberately its own workspace. The security kernel's `cargo test --workspace`
+# should not have to build Tauri's dependency tree to check the broker.
+[workspace]
+
+[lib]
+name = "secretctl_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+secretctl-domain = { path = "../../crates/secretctl-domain" }
+secretctl-protocol = { path = "../../crates/secretctl-protocol" }
+secretctl-crypto = { path = "../../crates/secretctl-crypto" }
+secretctl-providers = { path = "../../crates/secretctl-providers" }
+secretctl-provider-macos = { path = "../../crates/secretctl-provider-macos" }
+
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2"
+
+anyhow = "1.0"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-local-authentication = "0.3"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+rand = "0.8"
+rand_core = { version = "0.6", features = ["std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true

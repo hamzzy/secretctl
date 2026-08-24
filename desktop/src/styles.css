@@ -1,0 +1,143 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* macOS system-utility palette.
+ *
+ * Colours are defined once as tokens on :root and redefined for dark mode, so
+ * no component hard-codes a shade. Semantic colour never carries meaning on its
+ * own: every state that uses one also carries an icon and a word (spec §33). */
+:root {
+  --bg: #f7f7f8;
+  --bg-raised: #ffffff;
+  --bg-sunken: #efeff1;
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.18);
+  --text: #1c1c1e;
+  --text-secondary: #6b6b70;
+  --text-tertiary: #93939a;
+  --accent: #0a6cff;
+  --positive: #1a7f37;
+  --attention: #9a6700;
+  --negative: #b3261e;
+  --critical: #7d1a14;
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --bg-raised: #262629;
+    --bg-sunken: #161618;
+    --border: rgba(255, 255, 255, 0.1);
+    --border-strong: rgba(255, 255, 255, 0.2);
+    --text: #f2f2f5;
+    --text-secondary: #a0a0a8;
+    --text-tertiary: #75757d;
+    --accent: #5aa0ff;
+    --positive: #57c66d;
+    --attention: #e3b341;
+    --negative: #ff7b72;
+    --critical: #ff9c96;
+    --shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: theme("fontFamily.sans");
+  font-size: 13px;
+  line-height: 18px;
+  -webkit-font-smoothing: antialiased;
+  /* A control surface is not a document: nothing here should be selectable or
+   * draggable by accident. Text that matters is individually re-enabled. */
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+/* Respect the system setting rather than animating regardless (spec §33). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+@layer components {
+  .panel {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+  }
+
+  .section-label {
+    @apply text-2xs font-semibold uppercase tracking-wider;
+    color: var(--text-tertiary);
+  }
+
+  .divider {
+    border-top: 1px solid var(--border);
+  }
+
+  .btn {
+    @apply rounded-md px-3 py-1.5 text-sm font-medium transition-colors;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-raised);
+    color: var(--text);
+  }
+
+  .btn:hover:not(:disabled) {
+    background: var(--bg-sunken);
+  }
+
+  .btn:disabled {
+    opacity: 0.45;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: #ffffff;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+
+  .btn-danger {
+    color: var(--negative);
+  }
+
+  .link {
+    color: var(--accent);
+    @apply text-sm;
+  }
+
+  .link:hover {
+    text-decoration: underline;
+  }
+
+  /* Focus must stay visible: this is a security ceremony and keyboard users
+   * need to know exactly what Return will activate. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+.selectable {
+  user-select: text;
+  cursor: text;
+}

@@ -17,13 +17,13 @@ use chrono::Utc;
 use secretctl_audit::AuditContext;
 use secretctl_domain::{
     ActionKind, AgentId, ApprovalId, BrowserSessionState, CapabilityState, GrantId,
-    MAX_GRANTABLE_RISK, MAX_GRANT_TTL_DAYS, RiskLevel, StandingGrant,
+    MAX_GRANT_TTL_DAYS, MAX_GRANTABLE_RISK, RiskLevel, StandingGrant,
 };
 use secretctl_protocol::{
-    GrantCreateParams, GrantCreateResult, GrantRevokeResult, ReasonSource,
-    RpcError, RpcErrorCode, UiActiveOperation, UiActivityEvent, UiAgent, UiAuthorizationRequest,
-    UiBrowserSession, UiCredential, UiEventOutcome, UiFlowStep, UiGrant, UiOperationStep,
-    UiProtectionState, UiStatus, UiStepState, action_label,
+    GrantCreateParams, GrantCreateResult, GrantRevokeResult, ReasonSource, RpcError, RpcErrorCode,
+    UiActiveOperation, UiActivityEvent, UiAgent, UiAuthorizationRequest, UiBrowserSession,
+    UiCredential, UiEventOutcome, UiFlowStep, UiGrant, UiOperationStep, UiProtectionState,
+    UiStatus, UiStepState, action_label,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -46,7 +46,8 @@ fn sanitize_agent_text(text: &str) -> String {
     let cleaned: String = text
         .chars()
         .filter(|character| {
-            !character.is_control() && !matches!(*character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+            !character.is_control()
+                && !matches!(*character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
         })
         .take(MAX_AGENT_TEXT_CHARS)
         .collect();
@@ -99,7 +100,9 @@ impl BrokerState {
             .into_iter()
             .map(|entry| {
                 let authorization = &entry.authorization;
-                let risk = authorization.decision.risk_level;
+                // Shown to the human: the risk of the operation itself, not the
+                // High that the presence requirement mechanically implies.
+                let risk = authorization.base_risk;
                 let requires_presence = authorization.decision.require_user_presence;
                 UiAuthorizationRequest {
                     approval_id: entry.approval.approval_id.to_string(),
@@ -322,22 +325,14 @@ impl BrokerState {
         let origin = entry.capability.top_origin.to_string();
         let used_count = entry.capability.used_count;
         let max_uses = entry.capability.max_uses;
-        let recipe = self
-            .recipes
-            .read()
-            .unwrap()
-            .get(&entry.recipe_id)
-            .cloned();
+        let recipe = self.recipes.read().unwrap().get(&entry.recipe_id).cloned();
         drop(capabilities);
 
         let sessions = self.sessions.read().unwrap();
-        let protection_verified = sessions
-            .get(&session_id)
-            .is_some_and(|active_session| {
-                active_session.session.state == BrowserSessionState::Active
-                    && now - active_session.session.last_heartbeat_at
-                        < chrono::Duration::seconds(10)
-            });
+        let protection_verified = sessions.get(&session_id).is_some_and(|active_session| {
+            active_session.session.state == BrowserSessionState::Active
+                && now - active_session.session.last_heartbeat_at < chrono::Duration::seconds(10)
+        });
         drop(sessions);
 
         let agent_name = self
@@ -484,7 +479,10 @@ impl BrokerState {
             .list_audit_events()
             .map_err(|_| internal("Audit storage unavailable"))?;
         let mut latest: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
-        for event in events.iter().filter(|event| now - event.created_at <= window) {
+        for event in events
+            .iter()
+            .filter(|event| now - event.created_at <= window)
+        {
             if let Some(actor) = &event.actor_id {
                 latest
                     .entry(actor.clone())
@@ -635,7 +633,10 @@ impl BrokerState {
             .store
             .list_standing_grants(include_revoked)
             .map_err(|_| internal("Grant storage unavailable"))?;
-        Ok(grants.into_iter().map(|grant| ui_grant(grant, now)).collect())
+        Ok(grants
+            .into_iter()
+            .map(|grant| ui_grant(grant, now))
+            .collect())
     }
 
     /// Approve a pending request *and* create the standing authorization that
@@ -646,7 +647,10 @@ impl BrokerState {
     /// what makes it safe to expose grant creation to a frontend: the UI can
     /// only ever widen authority along a tuple the broker has just
     /// independently verified against a live, measured page.
-    pub fn ui_create_grant(&self, params: GrantCreateParams) -> Result<GrantCreateResult, RpcError> {
+    pub fn ui_create_grant(
+        &self,
+        params: GrantCreateParams,
+    ) -> Result<GrantCreateResult, RpcError> {
         let now = Utc::now();
         if params.ttl_days <= 0 || params.ttl_days > MAX_GRANT_TTL_DAYS {
             return Err(RpcError::new(
@@ -663,7 +667,10 @@ impl BrokerState {
             .cloned()
             .ok_or_else(|| RpcError::new(RpcErrorCode::INVALID_PARAMS, "Unknown approval ID"))?;
         let authorization = pending.authorization.clone();
-        let risk = authorization.decision.risk_level;
+        // Scored without the presence escalation: see `AuthorizationContext::
+        // base_risk`. Using the escalated risk here would refuse every request
+        // that can reach an approval panel at all.
+        let risk = authorization.base_risk;
 
         // The ceiling is a property of the system, not a choice offered to the
         // user: high and critical decisions always return to a human.
@@ -699,7 +706,10 @@ impl BrokerState {
             origin: authorization.page_context.top_origin.clone(),
             action: authorization.action,
             risk_ceiling: risk,
-            require_presence: authorization.decision.require_user_presence,
+            // The grant exists precisely to replace the presence step, and
+            // creating it already required verified presence. A grant that kept
+            // the flag would match nothing and silently do nothing.
+            require_presence: false,
             created_at: now,
             expires_at: now + chrono::Duration::days(params.ttl_days),
             revoked_at: None,
@@ -919,7 +929,10 @@ mod ui_projection_tests {
     #[test]
     fn agent_text_is_truncated_to_the_display_limit() {
         let long = "a".repeat(MAX_AGENT_TEXT_CHARS * 2);
-        assert_eq!(sanitize_agent_text(&long).chars().count(), MAX_AGENT_TEXT_CHARS);
+        assert_eq!(
+            sanitize_agent_text(&long).chars().count(),
+            MAX_AGENT_TEXT_CHARS
+        );
     }
 
     #[test]
