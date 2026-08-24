@@ -1240,12 +1240,17 @@ dependencies = [
 name = "secretctl-browser-gateway"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "secretctl-crypto",
  "secretctl-domain",
  "secretctl-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1323,11 +1328,19 @@ name = "secretctl-native-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "clap",
+ "futures",
  "secretctl-crypto",
  "secretctl-domain",
  "secretctl-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

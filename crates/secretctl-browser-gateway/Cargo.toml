@@ -10,6 +10,13 @@ authors.workspace = true
 secretctl-domain = { workspace = true }
 secretctl-protocol = { workspace = true }
 secretctl-crypto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
