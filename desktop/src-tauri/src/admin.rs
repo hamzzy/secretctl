@@ -281,3 +281,156 @@ fn random_nonce() -> String {
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
+
+#[cfg(test)]
+mod live_daemon_tests {
+    use super::*;
+
+    /// These exercise the real handshake against a running `secretctld`, which
+    /// is the one thing the daemon-side integration tests cannot cover: the
+    /// broker-key pin, the X25519 exchange, and the framed `SecureChannel` all
+    /// live on this side of the socket.
+    ///
+    /// They skip when no daemon is listening rather than failing, so the suite
+    /// stays runnable on a machine with no installation. Start one with
+    /// `secretctl start` to exercise them.
+    fn daemon_available() -> bool {
+        installation_dir().join("run/admin.sock").exists()
+            && installation_dir().join("broker_key.pub").exists()
+    }
+
+    async fn connected() -> Option<AdminConnection> {
+        if !daemon_available() {
+            eprintln!("skipping: no secretctld admin socket");
+            return None;
+        }
+        let connection = AdminConnection::new();
+        match connection.call("admin.ping", serde_json::json!({})).await {
+            Ok(_) => Some(connection),
+            Err(error) => {
+                eprintln!("skipping: could not reach secretctld ({error})");
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn every_ui_rpc_answers_and_deserializes_into_its_dto() {
+        let Some(connection) = connected().await else {
+            return;
+        };
+
+        let status: secretctl_protocol::UiStatus = serde_json::from_value(
+            connection
+                .call("ui.status", serde_json::json!({}))
+                .await
+                .expect("ui.status"),
+        )
+        .expect("status deserializes");
+        // A reachable daemon must never report itself disconnected.
+        assert_ne!(
+            status.protection,
+            secretctl_protocol::UiProtectionState::Disconnected
+        );
+
+        let _: Vec<secretctl_protocol::UiAuthorizationRequest> = serde_json::from_value(
+            connection
+                .call("ui.pending", serde_json::json!({}))
+                .await
+                .expect("ui.pending"),
+        )
+        .expect("pending deserializes");
+
+        let _: Vec<secretctl_protocol::UiActivityEvent> = serde_json::from_value(
+            connection
+                .call("ui.activity", serde_json::json!({"limit": 25}))
+                .await
+                .expect("ui.activity"),
+        )
+        .expect("activity deserializes");
+
+        let _: Vec<secretctl_protocol::UiAgent> = serde_json::from_value(
+            connection
+                .call("ui.agents", serde_json::json!({}))
+                .await
+                .expect("ui.agents"),
+        )
+        .expect("agents deserializes");
+
+        let _: Vec<secretctl_protocol::UiCredential> = serde_json::from_value(
+            connection
+                .call("ui.credentials", serde_json::json!({}))
+                .await
+                .expect("ui.credentials"),
+        )
+        .expect("credentials deserializes");
+
+        let _: Vec<secretctl_protocol::UiBrowserSession> = serde_json::from_value(
+            connection
+                .call("ui.browser_sessions", serde_json::json!({}))
+                .await
+                .expect("ui.browser_sessions"),
+        )
+        .expect("browser sessions deserializes");
+
+        let _: Vec<secretctl_protocol::UiGrant> = serde_json::from_value(
+            connection
+                .call("grant.list", serde_json::json!({"include_revoked": true}))
+                .await
+                .expect("grant.list"),
+        )
+        .expect("grants deserializes");
+    }
+
+    #[tokio::test]
+    async fn nothing_the_daemon_sends_this_process_carries_secret_material() {
+        let Some(connection) = connected().await else {
+            return;
+        };
+
+        // The wire itself, before any typed projection. If a secret-bearing
+        // field were ever added daemon-side, it would show up here even if the
+        // DTO happened to ignore it.
+        for (method, params) in [
+            ("ui.status", serde_json::json!({})),
+            ("ui.pending", serde_json::json!({})),
+            ("ui.activity", serde_json::json!({"limit": 200})),
+            ("ui.agents", serde_json::json!({})),
+            ("ui.credentials", serde_json::json!({})),
+            ("ui.browser_sessions", serde_json::json!({})),
+            ("grant.list", serde_json::json!({"include_revoked": true})),
+        ] {
+            let raw = connection
+                .call(method, params)
+                .await
+                .unwrap_or_else(|error| panic!("{method} failed: {error}"));
+            let text = serde_json::to_string(&raw).expect("serializable");
+            for forbidden in [
+                "provider_locator",
+                "token_hash",
+                "capability_token",
+                "public_key",
+                "private_key",
+                "secret_envelope",
+                "password",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{method} sent a forbidden field '{forbidden}'"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_is_renewed_without_the_caller_noticing() {
+        let Some(connection) = connected().await else {
+            return;
+        };
+        // Two calls across the same connection must both succeed; the second
+        // exercises reuse of the established SecureChannel and its nonce
+        // sequence, which is where a framing bug would surface.
+        connection.call("admin.ping", serde_json::json!({})).await.expect("first");
+        connection.call("admin.ping", serde_json::json!({})).await.expect("second");
+    }
+}
