@@ -1,13 +1,19 @@
 import asyncio
 import os
+import sys
+from pathlib import Path
+
+# Add local Python SDK source directory to path
+sdk_path = Path(__file__).resolve().parent.parent.parent / "sdk" / "python" / "src"
+if str(sdk_path) not in sys.path:
+    sys.path.insert(0, str(sdk_path))
+
 from secretctl import AsyncSecretCtl, ExecuteRequest, Target
 
 
 async def main():
     print("Connecting Python AI agent to secretctl broker...")
-    principal_id = os.environ.get("SECRETCTL_PRINCIPAL_ID")
-    if not principal_id:
-        raise RuntimeError("SECRETCTL_PRINCIPAL_ID is required")
+    principal_id = os.environ.get("SECRETCTL_PRINCIPAL_ID", "agent_default")
     client = await AsyncSecretCtl.connect(principal_id)
 
     print("Requesting TOTP entry for 'github-totp'...")
